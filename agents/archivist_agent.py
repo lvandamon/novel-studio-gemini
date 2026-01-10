@@ -2,66 +2,67 @@ import json
 from core.llm import get_deepseek_chat
 from core.prompts import ARCHIVIST_EXTRACT_PROMPT
 from core.memory import MemoryManager
+from core.schemas import ChapterExtractionSchema
 from langchain_core.output_parsers import StrOutputParser
 
 class ArchivistAgent:
     def __init__(self, memory_manager: MemoryManager):
-        self.llm = get_deepseek_chat(temperature=0.1) # 提取信息需要低温精确
+        self.llm = get_deepseek_chat(temperature=0.1) 
         self.chain = ARCHIVIST_EXTRACT_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
 
     def archive_chapter(self, content: str, chapter_num: int):
         """
-        1. 提取结构化数据更新 SQLite
-        2. 将正文存入 ChromaDB
+        1. 提取结构化数据 (Pydantic 校验)
+        2. 智能更新 SQLite 角色/物品/事件
+        3. 将正文存入 ChromaDB
         """
-        print(f"🗄️ 档案员 (Archivist) 正在整理第 {chapter_num} 章的数据...")
+        print(f"🗄️ Archivist: 正在深度解析第 {chapter_num} 章...")
         
         # 1. 存入 VectorDB
         self.memory.add_chapter_context(content, chapter_num)
         
-        # 2. 提取并更新 SQLite
+        # 2. 提取并校验
         try:
-            json_str = self.chain.invoke({"content": content})
-            # 清理可能的 markdown 标记
-            json_str = json_str.replace("```json", "").replace("```", "").strip()
+            raw_response = self.chain.invoke({"content": content})
+            # 清理 Markdown
+            clean_json = raw_response.replace("```json", "").replace("```", "").strip()
             
-            data = json.loads(json_str)
+            # 使用 Pydantic 强校验
+            extraction = ChapterExtractionSchema.model_validate_json(clean_json)
             
-            # 更新角色
-            if "characters" in data:
-                for char_update in data["characters"]:
-                    name = char_update.get("name")
-                    if not name: continue
-                    
-                    # 获取旧数据并合并 (这里简化为直接更新/覆盖字段)
-                    existing_data = self.memory.get_character(name) or {}
-                    updates = char_update.get("updates", {})
-                    # 简单的字典合并
-                    existing_data.update(updates)
-                    # 确保有一个基础结构
-                    if "name" not in existing_data: existing_data["name"] = name
-                    
-                    self.memory.upsert_character(name, existing_data)
-                    print(f"   -> 更新角色档案: {name}")
+            # 3. 更新摘要
+            self.memory.update_chapter_summary(chapter_num, extraction.summary)
 
-            # 更新物品 (逻辑类似)
-            if "items" in data:
-                # 暂时略过物品的详细实现，逻辑同上
-                pass
-            
-            # 记录关键事件 (Event Sourcing)
-            if "events" in data:
-                for event in data["events"]:
-                    char_name = event.get("character")
-                    evt_type = event.get("type", "general")
-                    desc = event.get("description")
-                    
-                    if char_name and desc:
-                        self.memory.log_event(chapter_num, char_name, evt_type, desc)
-                        print(f"   -> 记录事件: [{char_name}] {desc[:30]}...")
+            # 4. 更新角色 (使用 MemoryManager 的智能合并)
+            for char_data in extraction.characters:
+                name = char_data.get("name")
+                if name:
+                    # 将 updates 展平到 char_data 中以便 upsert
+                    updates = char_data.get("updates", {})
+                    char_data.update(updates)
+                    self.memory.upsert_character(name, char_data, chapter_num)
+                    print(f"   👤 角色更新: {name}")
 
-        except json.JSONDecodeError:
-            print("   ⚠️ 警告: 档案员提取的 JSON 格式错误，本次跳过结构化更新。")
+            # 5. 记录事件
+            for event in extraction.events:
+                self.memory.log_event(
+                    chapter_num, 
+                    event.character, 
+                    event.type, 
+                    f"{event.description} (影响: {event.impact})"
+                )
+                print(f"   🎭 事件记录: {event.character} -> {event.type}")
+
+            # 6. 处理伏笔
+            for hook in extraction.new_foreshadowing:
+                self.memory.add_foreshadowing(chapter_num, f"[{hook.type}] {hook.content}")
+                print(f"   📌 新伏笔: {hook.content[:20]}...")
+
+            for hook_id in extraction.resolved_foreshadowing_ids:
+                self.memory.resolve_foreshadowing(hook_id, chapter_num)
+                print(f"   ✅ 伏笔回收: ID {hook_id}")
+
         except Exception as e:
-            print(f"   ⚠️ 警告: 档案整理出错: {e}")
+            print(f"   ❌ Archivist 报错: {e}")
+            # 这里可以考虑加入重试逻辑或保存原始输出供调试

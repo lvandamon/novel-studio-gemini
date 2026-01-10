@@ -12,10 +12,14 @@ class ContextManager:
         """
         # 1. Global Context (Tier 1) - 动态从数据库获取
         focus = self.memory.get_narrative_focus()
+        pacing_warning = ""
+        if focus.get('chapters_since_last_beat', 0) >= 3:
+            pacing_warning = f"\n⚠️ 【节奏警告】：当前节拍已持续 {focus['chapters_since_last_beat']} 章，剧情可能开始拖沓，请务必在本章引入新的变量或加速向下一节拍过渡！"
+
         global_context = f"""
 【当前卷】：{focus['volume']}
 【当前单元 (Arc)】：{focus['arc']}
-【当前节拍 (Beat)】：{focus['beat']} (请严格遵循此节拍的叙事功能)
+【当前节拍 (Beat)】：{focus['beat']} {pacing_warning}
 【本单元目标】：{focus['goal']}
 【核心冲突】：{focus['conflict']}
 【世界动态】：{focus['state']}

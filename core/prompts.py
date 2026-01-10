@@ -306,33 +306,35 @@ REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages([
 
 # --- Archivist Agent (DeepSeek-V3) Prompts ---
 
-ARCHIVIST_SYSTEM_PROMPT = """你是网文世界的“档案员”，负责整理和更新世界观数据库。
-你的任务是从【正文内容】中提取或更新结构化数据（JSON）。
+ARCHIVIST_SYSTEM_PROMPT = """你是网文世界的“首席档案官”，负责将非结构化的章节正文转化为结构化的世界观数据。
+你拥有极强的逻辑归纳能力和细节捕捉能力。
 
-请关注以下实体：
-1. **Characters (角色)**：姓名、阵营、当前状态、新增关系、性格关键词。
-2. **Items (物品)**：名称、持有者、功能描述。
-3. **Events (关键事件)**：对角色命运或世界观有重大影响的事件（如：重伤、突破、获得宝物、结仇、死亡）。
+你的任务是输出一个详尽的 JSON 字符串（严禁包含 Markdown 标记），包含以下字段：
 
-输出必须是合法的 JSON 格式，不要包含任何 Markdown 代码块标记（如 ```json），直接输出 JSON 字符串。
-如果文中没有值得更新的信息，输出空 JSON `{{}}`。
+1. **summary**: 200-300字的章节精炼摘要。
+2. **characters**: 角色更新列表。
+   - name: 角色名
+   - updates: 包含 level(等级), status(状态: 如受伤、突破), location(位置), personality(新增性格标签), relationships(新增或变动的关系)
+3. **events**: 关键事件列表。
+   - character: 涉及的主角/关键配角
+   - type: 事件类型 (status_change, conflict, discovery, achievement, death)
+   - description: 简洁描述
+   - impact: 影响评估 (轻微, 中等, 重大)
+4. **new_foreshadowing**: 新埋下的伏笔。
+   - content: 伏笔描述
+   - type: 伏笔类型 (plot_hook, character_secret, world_mystery)
+   - importance: 重要程度 (1-5)
+5. **resolved_foreshadowing_ids**: 本章已回收的旧伏笔 ID 列表（如果有）。
+6. **world_updates**: 世界观/设定更新（如：新的地理名词、修炼等级体系、神话传说等）。
 
-JSON 结构示例：
+JSON 结构规范：
 {{
-    "characters": [
-        {{
-            "name": "萧风",
-            "updates": {{"status": "重伤", "location": "幽冥谷"}}
-        }}
-    ],
-    "items": [],
-    "events": [
-        {{
-            "character": "萧风",
-            "type": "status_change",
-            "description": "萧风在幽冥谷遭到黑魔老祖偷袭，失去左臂，修为跌落至筑基期。"
-        }}
-    ]
+    "summary": "...",
+    "characters": [{{"name": "...", "updates": {{...}} }}],
+    "events": [{{"character": "...", "type": "...", "description": "...", "impact": "..." }}],
+    "new_foreshadowing": [{{"content": "...", "type": "...", "importance": 3 }}],
+    "resolved_foreshadowing_ids": [],
+    "world_updates": []
 }}
 """
 
