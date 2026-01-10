@@ -58,11 +58,79 @@ class MemoryManager:
                 summary TEXT
             )
         ''')
+
+        # 新增：事件日志表 (Event Log)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chapter_num INTEGER,
+                character_name TEXT,
+                event_type TEXT, -- e.g., "status_change", "acquisition", "conflict"
+                description TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
         conn.close()
 
     # --- SQLite 操作 ---
+
+    def log_event(self, chapter_num: int, character_name: str, event_type: str, description: str):
+        """记录关键事件"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO events (chapter_num, character_name, event_type, description)
+            VALUES (?, ?, ?, ?)
+        ''', (chapter_num, character_name, event_type, description))
+        conn.commit()
+        conn.close()
+
+    def get_character_event_history(self, character_name: str, limit: int = 5) -> str:
+        """获取指定角色的最近关键事件"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT chapter_num, description FROM events 
+            WHERE character_name = ? 
+            ORDER BY chapter_num DESC 
+            LIMIT ?
+        ''', (character_name, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return "无相关历史事件。"
+        
+        history = []
+        for chapter, desc in rows:
+            history.append(f"[第 {chapter} 章] {desc}")
+        return "\n".join(history)
+
+    def get_recent_events(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """获取最近发生的全局事件 (用于 Dashboard 展示)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT chapter_num, character_name, event_type, description, timestamp 
+            FROM events 
+            ORDER BY id DESC 
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        events = []
+        for r in rows:
+            events.append({
+                "chapter": r[0],
+                "character": r[1],
+                "type": r[2],
+                "description": r[3],
+                "time": r[4]
+            })
+        return events
 
     def upsert_character(self, name: str, data: Dict[str, Any]):
         """更新或插入角色卡"""
@@ -83,23 +151,69 @@ class MemoryManager:
         conn.close()
         return json.loads(row[0]) if row else None
 
-    def get_all_characters_summary(self) -> str:
-        """获取所有角色及其基本状态的简要列表"""
+    def get_all_characters_list(self) -> List[Dict[str, Any]]:
+        """获取所有角色的完整数据列表，用于前端表格展示"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT name, data FROM characters')
         rows = cursor.fetchall()
         conn.close()
         
-        summary = []
+        chars = []
         for name, data_json in rows:
             data = json.loads(data_json)
-            # 假设角色卡有 'status' 和 'role' 字段
-            role = data.get('role', '未知身份')
-            status = data.get('status', '未知状态')
-            summary.append(f"- {name} ({role}): {status}")
+            if "name" not in data: data["name"] = name
+            chars.append(data)
+        return chars
+
+    def get_character_details(self, names: List[str]) -> str:
+        """获取指定角色的详细档案 (Tier 2 Context)"""
+        if not names:
+            return "无在场角色详情。"
+            
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        return "\n".join(summary) if summary else "暂无角色记录。"
+        # 动态构建查询
+        placeholders = ','.join('?' for _ in names)
+        cursor.execute(f'SELECT name, data FROM characters WHERE name IN ({placeholders})', names)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        details = []
+        for name, data_json in rows:
+            data = json.loads(data_json)
+            # 格式化为易读的文本块
+            info = f"--- {name} ---\n"
+            for k, v in data.items():
+                if k != "name": # 名字已经在标题里了
+                    info += f"{k}: {v}\n"
+            
+            # [新增] 追加历史事件
+            history = self.get_character_event_history(name, limit=3)
+            if history != "无相关历史事件。":
+                info += f"【近期经历】:\n{history}\n"
+                
+            details.append(info)
+            
+        return "\n".join(details) if details else "未找到指定角色档案。"
+
+    def get_character_roster_brief(self) -> str:
+        """获取所有角色的极简花名册 (Tier 3 Context - 仅姓名和身份，防幻觉)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, data FROM characters')
+        rows = cursor.fetchall()
+        conn.close()
+        
+        roster = []
+        for name, data_json in rows:
+            data = json.loads(data_json)
+            role = data.get('role', '未知')
+            # 极简模式：萧风[主角], 林月[师妹]
+            roster.append(f"{name}[{role}]")
+        
+        return ", ".join(roster) if roster else "暂无角色记录。"
 
     # --- VectorDB 操作 ---
 
@@ -113,9 +227,13 @@ class MemoryManager:
         doc = Document(page_content=text, metadata=metadata)
         self.vector_store.add_documents([doc])
     
+    def search_related_docs(self, query: str, k: int = 3) -> List[Document]:
+        """(底层方法) 根据关键词检索相关 Document 对象"""
+        return self.vector_store.similarity_search(query, k=k)
+
     def query_related_context(self, query: str, k: int = 3) -> str:
-        """根据关键词检索相关记忆"""
-        docs = self.vector_store.similarity_search(query, k=k)
+        """根据关键词检索相关记忆 (返回格式化字符串)"""
+        docs = self.search_related_docs(query, k)
         if not docs:
             return "暂无相关记忆。"
         

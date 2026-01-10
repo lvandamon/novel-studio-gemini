@@ -49,7 +49,18 @@ class ArchivistAgent:
             if "items" in data:
                 # 暂时略过物品的详细实现，逻辑同上
                 pass
-                
+            
+            # 记录关键事件 (Event Sourcing)
+            if "events" in data:
+                for event in data["events"]:
+                    char_name = event.get("character")
+                    evt_type = event.get("type", "general")
+                    desc = event.get("description")
+                    
+                    if char_name and desc:
+                        self.memory.log_event(chapter_num, char_name, evt_type, desc)
+                        print(f"   -> 记录事件: [{char_name}] {desc[:30]}...")
+
         except json.JSONDecodeError:
             print("   ⚠️ 警告: 档案员提取的 JSON 格式错误，本次跳过结构化更新。")
         except Exception as e:

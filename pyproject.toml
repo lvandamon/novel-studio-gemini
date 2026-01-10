@@ -16,4 +16,5 @@ dependencies = [
     "sentence-transformers>=5.2.0",
     "socksio>=1.0.0",
     "streamlit>=1.52.2",
+    "watchdog>=6.0.0",
 ]
