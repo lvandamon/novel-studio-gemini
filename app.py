@@ -2,11 +2,10 @@ import streamlit as st
 import os
 import re
 import json
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-import streamlit.components.v1 as components
 
 from core.memory import MemoryManager
 from core.context_manager import ContextManager
@@ -15,269 +14,287 @@ from agents.writer_agent import WriterAgent
 from agents.editor_agent import EditorAgent
 from agents.archivist_agent import ArchivistAgent
 from agents.reviewer_agent import ReviewerAgent
+from agents.foreshadowing_agent import ForeshadowingAgent
 
-# --- 配置与初始化 ---
-st.set_page_config(page_title="Novel Studio - 清风揽岳", page_icon="✍️", layout="wide")
+# --- 0. 全局配置 ---
+st.set_page_config(
+    page_title="DeepSeek Novel Studio - 清风揽岳", 
+    page_icon="🏔️", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 load_dotenv()
+
+# --- 1. 资源与状态初始化 (Cached) ---
+
+@st.cache_resource
+def get_memory_manager():
+    return MemoryManager()
+
+@st.cache_resource
+def get_agents(_memory):
+    return {
+        "editor": EditorAgent(),
+        "writer": WriterAgent(),
+        "reviewer": ReviewerAgent(_memory),
+        "archivist": ArchivistAgent(_memory),
+        "fore_shadow": ForeshadowingAgent(_memory)
+    }
+
+@st.cache_resource
+def get_context_manager(_memory):
+    return ContextManager(_memory)
+
+# 获取核心实例
+memory = get_memory_manager()
+context_manager = get_context_manager(memory)
+agents = get_agents(memory)
 
 # 初始化 Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "memory" not in st.session_state:
-    st.session_state.memory = MemoryManager()
-if "context_manager" not in st.session_state:
-    st.session_state.context_manager = ContextManager(st.session_state.memory)
-if "agents_loaded" not in st.session_state:
-    st.session_state.agents_loaded = False
+if "current_outline" not in st.session_state:
+    st.session_state.current_outline = None
+if "current_chapter_text" not in st.session_state:
+    st.session_state.current_chapter_text = ""
+if "current_review" not in st.session_state:
+    st.session_state.current_review = ""
+if "generation_log" not in st.session_state:
+    st.session_state.generation_log = [] # 记录生成过程的日志
 
-# 新增：结构化数据存储
-if "novel_toc" not in st.session_state:
-    st.session_state.novel_toc = "暂无目录，请通过对话生成。"
-if "current_chapter_content" not in st.session_state:
-    st.session_state.current_chapter_content = "暂无章节内容。"
-if "latest_review" not in st.session_state:
-    st.session_state.latest_review = "暂无审核报告。"
-if "char_relationship_graph" not in st.session_state:
-    st.session_state.char_relationship_graph = """
-    graph TD
-    A[主角] -->|未知关系| B[?]
-    """
+# --- 2. 辅助函数 ---
 
-# --- 辅助函数 ---
+def log_to_ui(message, level="info"):
+    """将后台日志推送到前端 session"""
+    icon = "ℹ️"
+    if level == "success": icon = "✅"
+    elif level == "warning": icon = "⚠️"
+    elif level == "error": icon = "❌"
+    elif level == "thinking": icon = "🧠"
+    elif level == "writing": icon = "✍️"
+    
+    st.session_state.generation_log.append(f"{icon} {message}")
 
-def get_main_llm():
+def get_chat_llm():
     return ChatOpenAI(
         model="deepseek-chat",
-        api_key=os.environ["DEEPSEEK_API_KEY"],
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
         base_url="https://api.deepseek.com/v1",
         temperature=0.7,
         streaming=True
     )
 
-def extract_code_block(text, label):
-    """从文本中提取指定标签的代码块内容 (用于提取目录或Mermaid)"""
-    # 简单正则提取 ```label ... ```
-    pattern = rf"```{{label}}\s*(.*?)"""
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return None
-
-def handle_command(command: str, user_input: str):
-    """处理特殊指令"""
-    # 提取章节号
-    chapter_match = re.search(r"/(?:章节|chapter)\s*(\d+)", user_input)
-    
-    if command == "章节" and chapter_match:
-        chapter_num = int(chapter_match.group(1))
-        return run_chapter_generation(chapter_num)
-    
-    # 目录生成/更新指令（通常在对话中触发，这里作为手动触发入口）
-    if command == "目录":
-        return "[系统提示] 请在对话中直接要求我生成目录（例如：'请生成小说目录'）。我会自动识别并更新右侧面板。"
-
-    return None
-
-def run_chapter_generation(chapter_num: int):
-    """后台运行章节生成工作流"""
-    if not st.session_state.agents_loaded:
-        st.session_state.editor = EditorAgent()
-        st.session_state.writer = WriterAgent()
-        st.session_state.reviewer = ReviewerAgent(st.session_state.memory)
-        st.session_state.archivist = ArchivistAgent(st.session_state.memory)
-        st.session_state.agents_loaded = True
-
-    status_container = st.status(f"🚀 正在撰写第 {chapter_num} 章...", expanded=True)
+def handle_generate_chapter(chapter_num: int):
+    """核心工作流：生成指定章节"""
+    st.session_state.generation_log = [] # 清空日志
+    progress_bar = st.progress(0, text="启动引擎...")
     
     try:
-        # 1. 准备大纲上下文 (Tier 1 + Tier 3)
-        summary = "（系统自动从上下文提取）承接上文剧情。" 
-        # TODO: 从 Memory 中获取真实的 summary
+        # 0. 准备阶段
+        log_to_ui(f"开始生成第 {chapter_num} 章...", "info")
+        prev_summary = memory.get_chapter_summary(chapter_num - 1)
+        if prev_summary == "暂无摘要。": prev_summary = "（首章或无前情，自动推演）"
         
-        editor_ctx = st.session_state.context_manager.build_editor_context(chapter_num, summary)
+        # 1. Editor (R1) - 制定大纲
+        progress_bar.progress(20, text="DeepSeek-R1: 正在思考叙事节拍与细纲...")
+        log_to_ui("主编正在审视全局状态 (Focus) 与历史记忆...", "thinking")
         
-        # 2. 大纲 (Editor)
-        status_container.write("🕵️‍♂️ 主编正在构思大纲 (DeepSeek-R1)...")
-        editor_output = st.session_state.editor.generate_outline(editor_ctx, chapter_num)
+        editor_ctx = context_manager.build_editor_context(chapter_num, prev_summary)
+        outline_data = agents["editor"].generate_outline(editor_ctx, chapter_num)
         
-        outline_str = editor_output.get("outline", "生成失败")
-        active_chars = editor_output.get("active_characters", [])
+        st.session_state.current_outline = outline_data # 存入 State
+        log_to_ui(f"大纲已锁定: {outline_data.get('title', '无标题')}", "success")
+        log_to_ui(f"叙事重心: {outline_data.get('narrative_focus', 'N/A')}", "info")
         
-        status_container.write(f"📋 大纲已确认，本章登场：{', '.join(active_chars) if active_chars else '无特定角色'}")
+        # 2. Writer (V3) - 撰写正文
+        progress_bar.progress(50, text="DeepSeek-V3: 正在挥毫泼墨...")
+        log_to_ui("作家正在根据大纲和联想记忆进行创作...", "writing")
         
-        # 3. 准备正文上下文 (Tier 1 + Tier 2 + Tier 4)
-        writer_ctx = st.session_state.context_manager.build_writer_context(outline_str, active_chars)
+        writer_ctx = context_manager.build_writer_context(
+            str(outline_data.get('outline', '')), 
+            outline_data.get('active_characters', [])
+        )
+        content = agents["writer"].write_chapter(str(outline_data.get('outline', '')), writer_ctx)
         
-        # 4. 正文 (Writer)
-        status_container.write("✍️ 作家正在挥毫泼墨 (DeepSeek-V3)...")
-        content = st.session_state.writer.write_chapter(outline_str, writer_ctx)
+        st.session_state.current_chapter_text = f"# 第 {chapter_num} 章 {outline_data.get('title', '')}\n\n{content}"
+        log_to_ui(f"正文创作完成，共 {len(content)} 字。", "success")
         
-        # 更新前端 State
-        st.session_state.current_chapter_content = f"# 第 {chapter_num} 章\n\n{content}"
+        # 3. Reviewer (R1) - 审核
+        progress_bar.progress(70, text="DeepSeek-R1: 毒舌书评人正在挑刺...")
+        log_to_ui("书评人正在进行逻辑一致性检查...", "thinking")
         
-        # 5. 审核
-        status_container.write("🧐 书评人正在审核...")
-        review = st.session_state.reviewer.review_draft(content)
-        st.session_state.latest_review = review
+        feedback = agents["reviewer"].review_draft(content)
+        st.session_state.current_review = feedback
         
-        # 6. 归档
-        status_container.write("🗄️ 档案员正在入库...")
-        st.session_state.archivist.archive_chapter(content, chapter_num)
+        if "PASS" in feedback.upper():
+            log_to_ui("审核通过！逻辑自洽。", "success")
+        else:
+            log_to_ui("审核提出修改意见 (已记录)", "warning")
+            
+        # 4. Archivist & Foreshadowing (V3) - 归档
+        progress_bar.progress(90, text="DeepSeek-V3: 正在整理档案与伏笔...")
+        log_to_ui("正在提取新设定与事件...", "info")
         
-        status_container.update(label="✅ 章节创作完成！请查看右侧预览。", state="complete")
+        agents["archivist"].archive_chapter(content, chapter_num)
+        hook_data = agents["fore_shadow"].analyze_hooks(content, chapter_num)
         
-        return f"""[系统提示] 第 {chapter_num} 章已生成。
-**大纲摘要**：
-{outline_str[:200]}...
-
-**登场角色**：
-{active_chars}
-
-(完整正文及审核报告已同步至右侧面板)
-"""
+        new_clues = hook_data.get("new_clues", [])
+        if new_clues:
+            for clue in new_clues:
+                log_to_ui(f"埋下新伏笔: {clue}", "warning")
+                
+        # 简单更新摘要 (实际可用 Summarizer)
+        memory.update_chapter_summary(chapter_num, f"{outline_data.get('title')} - 详情见正文")
+        
+        progress_bar.progress(100, text="完成")
+        st.toast(f"第 {chapter_num} 章生成完毕！")
+        
     except Exception as e:
-        status_container.update(label="❌ 生成失败", state="error")
+        log_to_ui(f"生成过程出错: {str(e)}", "error")
+        st.error(f"Error: {e}")
         import traceback
-        return f"[系统错误] 章节生成失败: {e}\n{traceback.format_exc()}"
+        print(traceback.format_exc())
 
-# --- 布局 ---
+# --- 3. 界面布局 ---
 
 # Header
-st.title("Novel Studio: 清风揽岳")
+st.title("🏔️ DeepSeek Novel Studio")
+st.caption("基于 DeepSeek R1/V3 双模型的长篇小说创作系统 | 动态记忆 | 节拍控制 | 自动归档")
 
-# 侧边栏：API Key 与设置
+# Sidebar: Controls
 with st.sidebar:
-    st.header("⚙️ 设置")
-    api_key = st.text_input("DeepSeek API Key", value=os.getenv("DEEPSEEK_API_KEY", ""), type="password")
-    if api_key:
-        os.environ["DEEPSEEK_API_KEY"] = api_key
+    st.header("🎛️ 控制台")
+    api_key = st.text_input("DeepSeek API Key", value=os.environ.get("DEEPSEEK_API_KEY", ""), type="password")
+    if api_key: os.environ["DEEPSEEK_API_KEY"] = api_key
     
-    if st.button("🗑️ 清空所有数据"):
-        st.session_state.messages = []
-        st.session_state.memory = MemoryManager()
-        st.session_state.context_manager = ContextManager(st.session_state.memory)
-        st.rerun()
-
-# 主界面：左右分栏
-col_chat, col_work = st.columns([0.4, 0.6])
-
-# --- 左侧：对话控制台 ---
-with col_chat:
-    st.subheader("💬 创作助理")
+    st.markdown("---")
+    st.subheader("📚 连载管理")
+    # 自动计算下一章章节号
+    # (简单起见，这里手动输入，未来可以从 DB 读取 max chapter)
+    target_chapter = st.number_input("目标章节号", min_value=1, value=1)
     
-    # 聊天历史容器
-    chat_container = st.container(height=600)
+    if st.button("🚀 生成该章节", type="primary", use_container_width=True):
+        if not api_key:
+            st.error("请先设置 API Key")
+        else:
+            handle_generate_chapter(target_chapter)
+            
+    st.markdown("---")
+    st.subheader("🛠️ 调试工具")
+    if st.button("🧹 重置所有数据 (慎用)"):
+        # 简单粗暴删文件
+        try:
+            if os.path.exists("data/novel.db"): os.remove("data/novel.db")
+            import shutil
+            if os.path.exists("data/vector_store"): shutil.rmtree("data/vector_store")
+            st.cache_resource.clear()
+            st.success("数据已清空，请刷新页面。")
+        except Exception as e:
+            st.error(f"清空失败: {e}")
+
+# Main Area
+col_left, col_right = st.columns([0.4, 0.6])
+
+# --- 左侧：战略视图 (Dashboard & Chat) ---
+with col_left:
+    # 1. 顶部仪表盘 (Dashboard)
+    st.subheader("📊 叙事仪表盘 (Narrative Dashboard)")
+    focus = memory.get_narrative_focus()
+    
+    # 使用 Metric 卡片展示关键信息
+    m1, m2 = st.columns(2)
+    m1.metric("当前卷 (Volume)", focus.get("volume", "未定义"))
+    m2.metric("当前单元 (Arc)", focus.get("arc", "未定义"))
+    
+    st.info(f"**当前节拍 (Beat)**: {focus.get('beat', '未定义')}")
+    st.warning(f"**核心冲突**: {focus.get('conflict', 'N/A')}")
+    
+    with st.expander("查看完整世界状态"):
+        st.write(f"**当前目标**: {focus.get('goal')}")
+        st.write(f"**世界动态**: {focus.get('state')}")
+        
+    st.markdown("---")
+    
+    # 2. 对话助手 (Chat)
+    st.subheader("💬 创作助理 (Chat Assistant)")
+    chat_container = st.container(height=400)
+    
+    # 初始化欢迎语
+    if not st.session_state.messages:
+        st.session_state.messages.append({"role": "assistant", "content": "我是清风揽岳。您可以直接在上方点击【生成章节】，或在这里与我讨论剧情。"})
+
     with chat_container:
-        if not st.session_state.messages and api_key:
-             # 初始引导
-            llm = get_main_llm()
-            try:
-                messages = [SystemMessage(content=MASTER_SYSTEM_PROMPT), HumanMessage(content="请开始自我介绍，并进入[小说设定]环节。")]
-                response = llm.invoke(messages).content
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            except:
-                pass
-
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-
-    # 输入框
-    if prompt := st.chat_input("输入指令 (如 /章节 1) 或对话内容..."):
-        if not api_key:
-            st.error("请先设置 API Key")
-            st.stop()
-
+                
+    if prompt := st.chat_input("输入剧情想法或指令..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with chat_container:
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-        # 指令处理
-        command_response = None
-        if prompt.startswith("/"):
-            cmd_type = prompt.split()[0].replace("/", "")
-            command_response = handle_command(cmd_type, prompt)
-
-        if command_response:
-            st.session_state.messages.append({"role": "assistant", "content": command_response})
-            with chat_container:
-                with st.chat_message("assistant"):
-                    st.markdown(command_response)
-            st.rerun() # 强制刷新以更新右侧面板
-        else:
-            # 普通对话
-            llm = get_main_llm()
-            history = [SystemMessage(content=MASTER_SYSTEM_PROMPT)]
-            for m in st.session_state.messages:
-                if m["role"] == "user": history.append(HumanMessage(content=m["content"]))
-                else: history.append(AIMessage(content=m["content"]))
+            st.chat_message("user").markdown(prompt)
             
-            with chat_container:
-                with st.chat_message("assistant"):
-                    stream = llm.stream(history)
-                    response_content = st.write_stream(stream)
+        # 简单对话逻辑 (不涉及复杂 Agent 调用，仅作为陪聊)
+        # 如果需要复杂功能，这里应该调用 Master Agent
+        llm = get_chat_llm()
+        try:
+            history = [SystemMessage(content=MASTER_SYSTEM_PROMPT)] + \
+                      [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"]) for m in st.session_state.messages]
             
-            st.session_state.messages.append({"role": "assistant", "content": response_content})
-            
-            # --- 智能解析 ---
-            # 尝试从对话中提取 目录 和 关系图 并更新 State
-            # 1. 提取 Mermaid
-            mermaid_code = extract_code_block(response_content, "mermaid")
-            if mermaid_code:
-                st.session_state.char_relationship_graph = mermaid_code
-                st.toast("检测到角色关系图更新！")
-            
-            # 2. 提取目录 (简单启发式：如果包含 "第x章"，且行数较多，认为是目录)
-            if "小说目录" in response_content and "第" in response_content:
-                st.session_state.novel_toc = response_content
-                st.toast("检测到目录更新！")
+            with st.chat_message("assistant"):
+                stream = llm.stream(history)
+                response = st.write_stream(stream)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+        except Exception as e:
+            st.error(f"对话出错: {e}")
 
-            st.rerun()
 
-# --- 右侧：工作台 ---
-with col_work:
-    st.subheader("🛠️ 实时工作台")
+# --- 右侧：战术视图 (Tactical View) ---
+with col_right:
+    st.subheader("📝 创作工作台")
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📄 章节预览", "📑 目录大纲", "🎭 角色列表", "🕸️ 角色关系", "🌍 设定集"])
+    # 使用 Tabs 分隔不同层级的信息
+    tab_log, tab_content, tab_outline, tab_data = st.tabs(["⚡️ 生成日志", "📄 正文预览", "📋 章节大纲", "🗃️ 资料库"])
     
-    with tab1:
-        st.markdown(st.session_state.current_chapter_content)
-        
-    with tab2:
-        st.markdown(st.session_state.novel_toc)
-        
-    with tab3:
-        st.markdown("### 🎭 登场人物志")
-        char_list = st.session_state.memory.get_all_characters_list()
-        if char_list:
-            import pandas as pd
-            # 将 JSON 数据转为 DataFrame 格式展示
-            df = pd.DataFrame(char_list)
-            # 重新排序列名，使其更符合阅读习惯
-            display_cols = ["name", "role", "personality", "status", "goal", "ability", "background"]
-            # 过滤掉不存在的列
-            available_cols = [c for c in display_cols if c in df.columns]
-            if not available_cols: available_cols = df.columns
-            
-            st.dataframe(df[available_cols], use_container_width=True)
+    with tab_log:
+        st.caption("系统运行实时日志")
+        if st.session_state.generation_log:
+            for log in st.session_state.generation_log:
+                st.markdown(log)
         else:
-            st.info("暂无角色数据。请在对话中定义角色，或输入 `/章节` 让档案员自动提取。")
+            st.info("暂无生成日志，请点击左侧【生成该章节】开始。")
             
-    with tab4:
-        if st.session_state.char_relationship_graph:
-            # 检查是否包含有效的 graphviz/mermaid 标记
-            dot_content = st.session_state.char_relationship_graph
-            if "graph" in dot_content or "digraph" in dot_content:
-                st.graphviz_chart(dot_content)
+    with tab_content:
+        if st.session_state.current_chapter_text:
+            st.markdown(st.session_state.current_chapter_text)
+            if st.session_state.current_review:
+                with st.expander("🧐 查看审核报告"):
+                    st.markdown(st.session_state.current_review)
+        else:
+            st.write("暂无正文内容。")
+            
+    with tab_outline:
+        if st.session_state.current_outline:
+            st.json(st.session_state.current_outline)
+        else:
+            st.write("暂无大纲数据。")
+            
+    with tab_data:
+        # 展示角色和伏笔
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            st.markdown("**👥 角色列表**")
+            chars = memory.get_all_characters_list()
+            if chars:
+                df = pd.DataFrame(chars)
+                st.dataframe(df[["name", "role", "status"]], hide_index=True)
             else:
-                st.info("检测到关系图数据，但格式暂不支持直接渲染。请确保 AI 输出的是标准 Mermaid 或 Graphviz 格式。")
-        else:
-            st.info("暂无关系图，请在对话中要求生成。")
-            
-    with tab5:
-        # 修改：使用 get_character_roster_brief 替代已删除的 get_all_characters_summary
-        chars_brief = st.session_state.memory.get_character_roster_brief()
-        st.markdown("### 🌍 世界观与全局设定")
-        st.text_area("角色花名册 (Roster)", value=chars_brief, height=150)
-        st.info("这里展示的是数据库中存储的精简花名册。")
+                st.caption("无数据")
+                
+        with col_d2:
+            st.markdown("**🎣 活跃伏笔**")
+            hooks = memory.get_active_foreshadowing()
+            if hooks:
+                for h in hooks:
+                    st.markdown(f"- [第{h['chapter']}章] {h['content']}")
+            else:
+                st.caption("无数据")
