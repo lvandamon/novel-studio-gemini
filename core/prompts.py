@@ -96,6 +96,38 @@ WRITER_GEN_CHAPTER_PROMPT = ChatPromptTemplate.from_messages([
     """)
 ])
 
+WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "你是一个苛刻的文学编辑。你的任务是检查草稿是否符合大纲要求。"),
+    ("user", """
+    【原始大纲】：
+    {outline}
+
+    【生成的草稿】：
+    {draft}
+
+    请检查：
+    1. 剧情是否偏离大纲？
+    2. 是否有明显的逻辑漏洞？
+    3. 字数是否达标？
+
+    如果一切正常，请仅输出 "PASS"。
+    如果有问题，请简要列出修改意见（3点以内）。
+    """)
+])
+
+WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "你是作家。根据编辑的意见修改草稿。"),
+    ("user", """
+    【原始草稿】：
+    {draft}
+
+    【修改意见】：
+    {critique}
+
+    请重写或修改草稿以解决上述问题。直接输出修改后的正文。
+    """)
+])
+
 # --- Reviewer Agent (DeepSeek-R1) Prompts ---
 
 REVIEWER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的毒舌书评人，拥有过目不忘的记忆力，对逻辑漏洞零容忍。

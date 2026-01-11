@@ -1,47 +1,101 @@
-from core.llm import get_deepseek_reasoner
-from core.prompts import EDITOR_GEN_OUTLINE_PROMPT
-from langchain_core.output_parsers import StrOutputParser
 import json
 import re
+from typing import Dict, Any, List
+from langchain_core.output_parsers import StrOutputParser
+from core.llm import get_deepseek_reasoner
+from core.prompts import EDITOR_GEN_OUTLINE_PROMPT
 
 class EditorAgent:
     def __init__(self):
+        # 使用 R1 推理模型进行大纲构思
         self.llm = get_deepseek_reasoner()
         self.chain = EDITOR_GEN_OUTLINE_PROMPT | self.llm | StrOutputParser()
 
-    def generate_outline(self, context_package: str, chapter_num: int) -> dict:
+    def _clean_json(self, text: str) -> str:
         """
-        调用 R1 模型生成章节大纲，并解析 JSON 输出
-        返回: {"outline": str, "active_characters": list}
+        针对 Reasoner 模型的鲁棒 JSON 提取器
+        1. 移除 <think> 思考过程
+        2. 提取 markdown json 块
+        3. 兜底提取 {}
         """
-        print(f"🕵️‍♂️ 主编 (Editor) 正在思考第 {chapter_num} 章大纲...")
-        raw_output = self.chain.invoke({
-            "context": context_package,
-            "chapter_num": chapter_num
-        })
+        # 1. 移除 <think> 标签及其内容 (非贪婪匹配)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         
-        # 尝试提取 JSON
+        # 2. 尝试匹配 ```json ... ```
+        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1)
+            
+        # 3. 尝试匹配最外层的 {}
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if match:
+            return match.group(1)
+            
+        return text.strip()
+
+    def generate_outline(self, chapter_num: int, context_package: str) -> Dict[str, Any]:
+        """
+        调用 R1 模型生成章节大纲，并进行格式清洗和补全。
+        """
+        print(f"🧠 Editor: 正在构思第 {chapter_num} 章大纲 (DeepSeek-R1)...")
+        
         try:
-            # 匹配 ```json ... ``` 或直接寻找 {...}
-            json_match = re.search(r"```json\s*(.*?)\s*```", raw_output, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                # 兜底：尝试找最外层的大括号
-                json_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-                json_str = json_match.group(0) if json_match else "{}"
+            raw_output = self.chain.invoke({
+                "context": context_package,
+                "chapter_num": chapter_num
+            })
             
-            data = json.loads(json_str)
+            cleaned_json = self._clean_json(raw_output)
+            data = json.loads(cleaned_json)
             
-            # 确保有必要的字段
-            if "outline" not in data: data["outline"] = raw_output # 降级：如果解析失败，把全文当大纲
-            if "active_characters" not in data: data["active_characters"] = []
+            # --- 字段完整性校验与补全 ---
             
+            # 1. Title
+            if "title" not in data:
+                data["title"] = f"第 {chapter_num} 章"
+                
+            # 2. Outline (标准化为 List[str])
+            if "outline" not in data:
+                data["outline"] = ["本章大纲生成失败，请人工核查。"]
+            elif isinstance(data["outline"], str):
+                # 如果模型偷懒只返回了字符串，尝试按行分割
+                data["outline"] = [line.strip() for line in data["outline"].split('\n') if line.strip()]
+                
+            # 3. Active Characters
+            if "active_characters" not in data:
+                data["active_characters"] = []
+                
+            # 4. Scene Location
+            if "scene_location" not in data:
+                data["scene_location"] = "未知地点"
+                
+            # 5. Atmosphere (确保是 Dict)
+            if "atmosphere" not in data or not isinstance(data["atmosphere"], dict):
+                data["atmosphere"] = {
+                    "tone": "正常",
+                    "sensory_focus": "视觉",
+                    "color_palette": "正常"
+                }
+
+            print(f"   ✅ 大纲生成完毕: 《{data['title']}》- 共 {len(data['outline'])} 个节点")
             return data
-            
-        except Exception as e:
-            print(f"⚠️ 大纲解析失败: {e}")
+
+        except json.JSONDecodeError:
+            print(f"   ⚠️ Editor JSON 解析失败。Raw output:\n{raw_output[:200]}...")
             return {
-                "outline": raw_output, # 容错
-                "active_characters": []
+                "title": f"第 {chapter_num} 章 (解析错误)",
+                "outline": ["大纲生成数据格式错误，请检查日志。"],
+                "active_characters": [],
+                "scene_location": "未知",
+                "atmosphere": {},
+                "error": "JSON Parse Error"
+            }
+        except Exception as e:
+            print(f"   ⚠️ Editor 运行错误: {e}")
+            return {
+                "title": "错误",
+                "outline": [f"系统错误: {str(e)}"],
+                "active_characters": [],
+                "scene_location": "未知",
+                "atmosphere": {}
             }

@@ -36,9 +36,7 @@ def get_deepseek_reasoner() -> ChatOpenAI:
         model="deepseek-reasoner",
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
-        # R1 推荐 temperature 为 0 或低值以保证逻辑严密性，
-        # 但部分推理模型可能不支持调节 temperature，这里设为 0.6 作为折中或默认。
-        # 官方建议 R1 一般不调温或低温。
-        temperature=0.6, 
+        # R1 推荐 temperature 为 0 以保证逻辑严密性。
+        temperature=0.0, 
         streaming=True
     )

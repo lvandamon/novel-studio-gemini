@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Dict, Any, List
 from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_reasoner
@@ -13,7 +14,25 @@ class DirectorAgent:
         self.memory = memory_manager
 
     def _clean_json(self, text: str) -> str:
-        return text.replace("```json", "").replace("```", "").strip()
+        """
+        Robust JSON extractor for Reasoner models that might output thoughts.
+        """
+        # 1. Remove <think> blocks if present
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        
+        # 2. Try to find markdown JSON block
+        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1)
+            
+        # 3. Try to find the first valid JSON object enclosed in braces
+        # This regex looks for { ... } minimally
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if match:
+            return match.group(1)
+            
+        # 4. Fallback: return original stripped (likely to fail but worth a try)
+        return text.strip()
 
     def evaluate_progress(self, current_chapter: int) -> Dict[str, Any]:
         """
@@ -33,15 +52,15 @@ class DirectorAgent:
         recent_summaries_text = "\n".join(summaries)
 
         # 计算进度
-        arc_data = plan.get("arc", {}) or {}
+        arc_data = plan.get("arc", {{}}) or {{}}
         start_chapter = arc_data.get("start_chapter", 1)
         chapters_used = current_chapter - start_chapter + 1
         
         # 2. 调用 LLM
         try:
             response = self.chain.invoke({
-                "volume_name": plan.get("volume", {}).get("name", "未命名卷"),
-                "volume_goal": plan.get("volume", {}).get("goal", "无"),
+                "volume_name": plan.get("volume", {{}}).get("name", "未命名卷"),
+                "volume_goal": plan.get("volume", {{}}).get("goal", "无"),
                 "arc_name": arc_data.get("name", "未命名单元"),
                 "arc_goal": arc_data.get("goal", "无"),
                 "start_chapter": start_chapter,
@@ -52,14 +71,19 @@ class DirectorAgent:
                 "current_focus": json.dumps(focus, ensure_ascii=False)
             })
             
-            # 3. 解析结果
-            decision = json.loads(self._clean_json(response))
+            # 3. 解析结果 (Robust)
+            cleaned_json = self._clean_json(response)
+            decision = json.loads(cleaned_json)
             
             # 4. 执行决策 (自动更新 Narrative Focus)
             self._apply_decision(decision)
             
             return decision
 
+        except json.JSONDecodeError as e:
+            print(f"   ⚠️ Director JSON 解析失败: {e}")
+            # print(f"   RAW OUTPUT: {response[:200]}...") 
+            return {"error": "JSON Parse Error"}
         except Exception as e:
             print(f"   ⚠️ Director 思考短路: {e}")
             return {"error": str(e)}

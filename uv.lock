@@ -1649,6 +1649,7 @@ dependencies = [
     { name = "sentence-transformers" },
     { name = "socksio" },
     { name = "streamlit" },
+    { name = "tiktoken" },
     { name = "watchdog" },
 ]
 
@@ -1673,6 +1674,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=5.2.0" },
     { name = "socksio", specifier = ">=1.0.0" },
     { name = "streamlit", specifier = ">=1.52.2" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "watchdog", specifier = ">=6.0.0" },
 ]
 
