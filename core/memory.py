@@ -161,9 +161,143 @@ class MemoryManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # 世界圣经 (World Bible) - 绝对真理库
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS world_bible (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT, -- 'WorldRule', 'Magic', 'CharacterCore', 'History'
+                topic TEXT,    -- e.g. 'Mana', 'Protagonist_Vengeance', 'Kingdom_Map'
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 文风样板库 (Style Guide / Golden Samples)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS style_guide (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT, -- 'Action', 'Scenery', 'Dialogue', 'InnerMonologue'
+                content TEXT,
+                notes TEXT
+            )
+        ''')
         
         conn.commit()
         conn.close()
+
+    # --- 文风样板 (Style Guide) ---
+
+    def add_style_sample(self, category: str, content: str, notes: str = ""):
+        """添加一个黄金样板段落"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO style_guide (category, content, notes) VALUES (?, ?, ?)', (category, content, notes))
+        conn.commit()
+        conn.close()
+        print(f"🖋️ Style Sample Added: [{category}]")
+
+    def get_style_examples(self, limit: int = 3) -> str:
+        """
+        随机获取几个黄金样板，作为写作参考。
+        (未来可以优化为根据当前场景类型 category 检索)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # 随机取样，保证每次写作都有点新鲜感，但都在风格框架内
+        cursor.execute('SELECT category, content FROM style_guide ORDER BY RANDOM() LIMIT ?', (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows: return ""
+        
+        lines = ["# 🖋️ 文风参考 (Style Reference) - 请模仿以下笔触"]
+        for cat, content in rows:
+            lines.append(f"--- [Example: {cat}] ---\n{content}")
+        
+        return "\n".join(lines)
+
+    # --- 世界圣经 (World Bible / Immutable Truths) ---
+
+    def add_bible_entry(self, category: str, topic: str, content: str):
+        """添加一条绝对真理。同时存入 SQL (用于管理) 和 VectorDB (用于检索)。"""
+        # 1. SQL Storage
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO world_bible (category, topic, content) 
+            VALUES (?, ?, ?)
+        ''', (category, topic, content))
+        entry_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        # 2. Vector Storage (Strongly weighted metadata)
+        # 格式化内容，强调这是规则
+        full_text = f"【世界圣经/绝对规则】[{category}] {topic}: {content}"
+        self.vector_store.add_documents([
+            Document(
+                page_content=full_text, 
+                metadata={
+                    "type": "bible_truth", 
+                    "category": category, 
+                    "topic": topic, 
+                    "entry_id": entry_id
+                }
+            )
+        ])
+        print(f"✝️ Bible Entry Added: [{category}] {topic}")
+
+    def get_bible_context(self, query: str, active_entities: List[str] = None) -> str:
+        """
+        检索相关的世界圣经条目。
+        策略：
+        1. 关键词硬匹配 (High Precision): 检查 active_entities 是否匹配 Bible 中的 topic。
+        2. 语义检索 (High Recall): 针对 query 检索相关的规则。
+        """
+        if active_entities is None: active_entities = []
+        
+        found_entries = {} # id -> content
+
+        # A. 关键词硬匹配 (直接查询 Topic)
+        if active_entities:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # 动态构建 SQL OR 查询
+            placeholders = ','.join(['?'] * len(active_entities))
+            # 模糊匹配 topic，以防 active_entity 是 "Xiao Feng" 而 topic 是 "Xiao Feng's Sword"
+            # 这里简化为直接匹配 topic 包含 entity 名字
+            sql = f"SELECT id, category, topic, content FROM world_bible WHERE topic IN ({placeholders})"
+            cursor.execute(sql, tuple(active_entities))
+            rows = cursor.fetchall()
+            
+            for r in rows:
+                entry_text = f"[{r[1]}] {r[2]}: {r[3]}"
+                found_entries[r[0]] = entry_text
+            conn.close()
+
+        # B. 语义检索 (针对当前情节 query)
+        # 强制过滤 type='bible_truth'
+        semantic_docs = self.vector_store.similarity_search(
+            query, 
+            k=5, 
+            filter={"type": "bible_truth"}
+        )
+        
+        for doc in semantic_docs:
+            eid = doc.metadata.get("entry_id")
+            if eid and eid not in found_entries:
+                found_entries[eid] = doc.page_content
+
+        if not found_entries:
+            return ""
+
+        # 格式化输出
+        lines = ["# ✝️ 世界圣经 (Immutable Truths - DO NOT VIOLATE)"]
+        for _, content in found_entries.items():
+            lines.append(f"- {content}")
+        
+        return "\n".join(lines)
 
     # --- 角色操作 (UUID Core) ---
 
@@ -730,7 +864,11 @@ class MemoryManager:
 
     # --- 事件与伏笔 (支持 RealityLayer) ---
 
-    def log_event(self, chapter_num: int, character_name: str, event_type: str, description: str, layer: str = "Reality"):
+    def log_event(self, chapter_num: int, character_name: str, event_type: str, description: str, layer: str = "Reality", cause_event_id: int = None):
+        """
+        记录事件。
+        增强: 同步写入 Knowledge Graph (Event Node).
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('INSERT INTO events (chapter_num, character_name, event_type, description, layer) VALUES (?, ?, ?, ?, ?)', 
@@ -741,6 +879,33 @@ class MemoryManager:
         
         full_text = f"[{layer}] {character_name} {event_type}: {description}"
         self.event_store.add_documents([Document(page_content=full_text, metadata={"event_id": event_id, "chapter": chapter_num, "character": character_name, "type": event_type, "layer": layer})])
+
+        # --- Graph Synchronization ---
+        # 仅同步 Reality 层的事件进图谱，避免臆想污染因果链
+        if layer == "Reality":
+            # 1. 创建事件节点
+            self.graph.add_event_node(
+                event_uid=str(event_id),
+                description=description,
+                chapter=chapter_num,
+                event_type=event_type
+            )
+            
+            # 2. 关联参与者 (Character -> Event)
+            # 如果涉及多个角色(逗号分隔)，简单处理一下
+            chars = [c.strip() for c in character_name.split(',')]
+            for c in chars:
+                self.graph.add_participation(c, str(event_id), role="Participant")
+
+            # 3. 如果提供了原因 (Cause)，建立因果链
+            if cause_event_id:
+                self.graph.add_causality(str(cause_event_id), str(event_id), reason="Explicit Link")
+        
+        return event_id
+
+    def link_event_causality(self, cause_event_id: int, effect_event_id: int, reason: str = ""):
+        """显式建立两个事件的因果关系"""
+        self.graph.add_causality(str(cause_event_id), str(effect_event_id), reason)
 
     def get_relevant_events(self, character_name: str, query: str = "", recent_k: int = 5, semantic_k: int = 5) -> str:
         conn = sqlite3.connect(self.db_path)

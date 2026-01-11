@@ -113,6 +113,14 @@ class ContextManager:
         为 Writer (作家) 提供的执行视角上下文。
         采用分层构建 + 动态预算。
         """
+        # --- 0. World Bible Layer (绝对真理 - 最高优先级) ---
+        # 检索与当前情节(outline)和角色(active_characters)相关的绝对规则
+        bible_text = self.memory.get_bible_context(query=outline, active_entities=active_characters)
+        bible_tokens = self._count_tokens(bible_text)
+        
+        # 扣除 Bible 的预算 (它不参与动态裁剪，必须保留)
+        current_budget = self.total_budget - bible_tokens
+        
         # --- 1. Global Layer (世界与目标) ---
         focus = self.memory.get_narrative_focus()
         global_text = f"""
@@ -145,7 +153,7 @@ class ContextManager:
 
         # --- 3. Calculating Remaining Budget for Retrieval ---
         used_tokens = self._count_tokens(global_text) + self._count_tokens(local_text)
-        remaining_budget = self.total_budget - used_tokens
+        remaining_budget = current_budget - used_tokens
         # 至少保留 4000 给检索，否则检索无意义
         retrieval_budget = max(4000, remaining_budget)
         
@@ -188,5 +196,7 @@ class ContextManager:
 """
 
         # --- Final Assembly ---
-        full_context = f"{global_text}\n{local_text}\n{retrieval_text}"
+        # Bible 放在最前面!
+        # Bible -> Global -> Local -> Style -> Retrieval
+        full_context = f"{bible_text}\n{global_text}\n{local_text}\n{style_text}\n{retrieval_text}"
         return full_context

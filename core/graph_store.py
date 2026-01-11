@@ -41,8 +41,7 @@ class GraphManager:
         # Sanitize Labels
         source_label = self._sanitize_label(source_type)
         target_label = self._sanitize_label(target_type)
-        relation_type = self._sanitize_label(relation.upper()).replace("`", "") # Relation types usually don't need backticks if simple, but better safe. Actually, relationship types in Cypher usually stick to simple chars. But wrapping in backticks is valid for types too.
-        # Let's use backticks for relation type too.
+        # Relation types usually don't need backticks if simple, but better safe. Actually, relationship types in Cypher usually stick to simple chars. But wrapping in backticks is valid for types too.
         relation_label = f"`{relation.upper().replace('`', '')}`"
 
 
@@ -50,6 +49,73 @@ class GraphManager:
             self._logical_delete_relationship(source, relation_label, target, chapter_num)
         else:
             self._upsert_relationship(source, source_label, relation_label, target, target_label, properties, chapter_num)
+
+    # --- 事件因果图 (Event Causality DAG) ---
+
+    def add_event_node(self, event_uid: str, description: str, chapter: int, event_type: str = "Major"):
+        """创建或更新事件节点"""
+        if not self.driver: return
+        
+        query = """
+        MERGE (e:Event {uid: $uid})
+        SET e.description = $desc, 
+            e.chapter = $chapter, 
+            e.type = $type,
+            e.updated_at = timestamp()
+        """
+        with self.driver.session() as session:
+            session.run(query, uid=str(event_uid), desc=description, chapter=chapter, type=event_type)
+
+    def add_causality(self, cause_event_uid: str, effect_event_uid: str, reason: str = ""):
+        """记录因果链: (Event A) -[CAUSED]-> (Event B)"""
+        if not self.driver: return
+        
+        query = """
+        MATCH (a:Event {uid: $cause_uid})
+        MATCH (b:Event {uid: $effect_uid})
+        MERGE (a)-[r:CAUSED]->(b)
+        SET r.reason = $reason
+        """
+        with self.driver.session() as session:
+            session.run(query, cause_uid=str(cause_event_uid), effect_uid=str(effect_event_uid), reason=reason)
+
+    def add_participation(self, character_name: str, event_uid: str, role: str):
+        """记录角色参与事件: (Character) -[PARTICIPATED_IN {role: ...}]-> (Event)"""
+        if not self.driver: return
+        
+        query = """
+        MATCH (c {name: $char_name})
+        MATCH (e:Event {uid: $event_uid})
+        MERGE (c)-[r:PARTICIPATED_IN]->(e)
+        SET r.role = $role
+        """
+        with self.driver.session() as session:
+            session.run(query, char_name=character_name, event_uid=str(event_uid), role=role)
+
+    def query_causal_chain(self, event_uid: str, depth: int = 3) -> str:
+        """
+        反向追溯：查出导致该事件的前因后果。
+        Returns: 描述文本
+        """
+        if not self.driver: return "（图谱未连接）"
+
+        # 查询导致该事件的上游事件 (Ancestors)
+        query = f"""
+        MATCH p = (root:Event {{uid: $uid}})<-[:CAUSED*1..{depth}]-(cause:Event)
+        RETURN cause.chapter as chap, cause.description as desc, length(p) as dist
+        ORDER BY dist ASC
+        """
+        
+        chain = []
+        with self.driver.session() as session:
+            result = session.run(query, uid=str(event_uid))
+            for record in result:
+                chain.append(f"   ⬆️ [Ch{record['chap']}] 因为: {record['desc']}")
+        
+        if not chain:
+            return "无明确前因记录。"
+            
+        return "导致此事件的因果链:\n" + "\n".join(chain)
 
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
