@@ -113,128 +113,111 @@ class ContextManager:
 {recent_history}
 """
 
+    def _analyze_plot_intent(self, outline: str) -> Dict[str, Any]:
+        """
+        [核心逻辑] 意图解析器：分析大纲需要什么样的背景知识。
+        """
+        # 这里未来可以调用一个轻量级的 LLM (如 DeepSeek-V3) 来做解析
+        # 目前先用关键词启发式逻辑作为 Baseline
+        intent = {
+            "type": "general",
+            "entities": [],
+            "needs_skills": False,
+            "needs_relations": False,
+            "needs_history": False,
+            "needs_hooks": False
+        }
+        
+        # 简单启发式分析
+        low_outline = outline.lower()
+        if any(w in low_outline for w in ["打", "战", "杀", "斗", "招式", "伤"]):
+            intent["type"] = "combat"
+            intent["needs_skills"] = True
+        elif any(w in low_outline for w in ["说", "谈", "骂", "争执", "秘密", "心想"]):
+            intent["type"] = "dialogue"
+            intent["needs_relations"] = True
+        elif any(w in low_outline for w in ["发现", "原来", "真相", "线索", "伏笔"]):
+            intent["type"] = "revelation"
+            intent["needs_hooks"] = True
+            
+        return intent
+
     def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None) -> str:
         """
-        为 Writer (作家) 提供的执行视角上下文。
-        采用分层构建 + 动态预算。
+        重构后的 Writer 上下文构建：意图驱动型检索
         """
-        # --- 0. World Bible Layer (绝对真理 - 最高优先级) ---
-        # 检索与当前情节(outline)和角色(active_characters)相关的绝对规则
-        bible_text = self.memory.get_bible_context(query=outline, active_entities=active_characters)
-        bible_tokens = self._count_tokens(bible_text)
+        # 0. 意图分析
+        intent = self._analyze_plot_intent(outline)
         
-        # 扣除 Bible 的预算 (它不参与动态裁剪，必须保留)
-        current_budget = self.total_budget - bible_tokens
+        # --- 1. World Bible (绝对真理层) ---
+        # 检索逻辑：除了搜大纲，还要显式搜“世界规则”和“地理设定”
+        bible_query = f"{scene_location} {outline[:50]}"
+        bible_text = self.memory.get_bible_context(query=bible_query, active_entities=active_characters)
         
-        # --- 1. Global & Story Layer (世界与剧情脉络) ---
+        current_budget = self.total_budget - self._count_tokens(bible_text)
+
+        # --- 2. Story State (状态层) ---
+        # 这一层不检索，直接从数据库取结构化数据
         focus = self.memory.get_narrative_focus()
         active_plan = self.memory.get_active_plan()
-        
-        # 获取中期记忆 (最近的批量摘要)
-        story_so_far = self.memory.get_recent_aggregated_summaries(limit=2)
-        # 获取上一章摘要
         prev_summary = self.memory.get_chapter_summary(chapter_num - 1)
-
-        # 构建规划信息
-        plan_info = ""
-        if active_plan["volume"]:
-            plan_info += f"【当前卷】: {active_plan['volume']['name']} (目标: {active_plan['volume']['goal']})\n"
-        if active_plan["arc"]:
-            plan_info += f"【当前单元】: {active_plan['arc']['name']} (目标: {active_plan['arc']['goal']})\n"
-
-        global_text = f"""
-# 🌍 全局层 (Global Context)
-【当前目标】: {focus['goal']} 
-【当前冲突】: {focus['conflict']} 
-【世界基调】: {atmosphere.get('tone', '默认') if atmosphere else '默认'}
-【时间】: {focus.get('date', '未知')}
-
-# 📜 剧情脉络 (Story Context)
-## 1. 顶层规划
-{plan_info}
-
-## 2. 前情提要 (Medium-term Memory)
-{story_so_far if story_so_far else "（暂无阶段性综述）"}
-
-## 3. 上章回顾 (Immediate Context)
-{prev_summary}
-"""
         
-        # --- 2. Local Layer (场景与在场者) ---
-        # 场景花名册 (Writer 只需要看当前的)
-        local_roster = self.memory.get_local_roster(scene_location)
-        local_roster_trimmed = self._trim_lines_to_budget(local_roster, self.base_budgets["local_roster"])
-        
-        local_text = f"""
-# 📍 局部层 (Local Context)
-【场景地点】: {scene_location}
-【感官焦点】: {atmosphere.get('sensory_focus', '无') if atmosphere else '无'}
+        # 强制获取活跃伏笔 (不再靠 RAG 碰运气)
+        active_hooks = ""
+        if intent["needs_hooks"] or intent["type"] == "revelation":
+            hooks = self.memory.get_active_foreshadowing()
+            if hooks:
+                active_hooks = "\n【当前活跃伏笔】:\n" + "\n".join([f"- {h['content']} (ID:{h['id']})" for h in hooks])
 
-【场景内角色 (Roster)】:
-{local_roster_trimmed}
+        state_text = f"""
+# 🌍 宏观状态
+【目标】: {focus['goal']}
+【当前冲突】: {focus['conflict']}
+【卷/单元规划】: {active_plan.get('volume', {}).get('name', '默认')} -> {active_plan.get('arc', {}).get('name', '默认')}
+{active_hooks}
+
+# 📜 前情提要
+【上一章回顾】: {prev_summary}
 """
 
-        # --- 3. Calculating Remaining Budget for Retrieval ---
-        used_tokens = self._count_tokens(global_text) + self._count_tokens(local_text)
-        remaining_budget = current_budget - used_tokens
-        # 至少保留 4000 给检索，否则检索无意义
-        retrieval_budget = max(4000, remaining_budget)
+        # --- 3. Targeted Retrieval (定向检索层) ---
+        # 根据意图分配预算和检索词
+        used_tokens = self._count_tokens(state_text)
+        retrieval_budget = current_budget - used_tokens
         
-        # 分配检索预算: 角色详情(40%) + 历史记忆(40%) + 关系图谱(20%)
-        budget_chars = int(retrieval_budget * 0.4)
-        budget_rag = int(retrieval_budget * 0.4)
-        budget_graph = int(retrieval_budget * 0.2)
-
-        # --- 4. Retrieval Layer (动态检索) ---
+        # A. 角色状态 (Mental Ledger & Status)
+        # 不再只搜背景，要搜“当前的伤势、心情、持有的道具”
+        char_info = "# 👥 角色实时状态\n"
+        for char_name in active_characters:
+            # 这里的 get_character_details 需要返回结构化的状态栏而非仅仅是简介
+            details = self.memory.get_character_details([char_name], query=outline)
+            char_info += f"## {char_name}\n{details}\n"
         
-        # A. 角色详情 (基于 Outline 里的行为检索相关经历)
-        # 注意: get_character_details 内部已经包含了 query 能力
-        char_details = self.memory.get_character_details(active_characters, query=outline)
-        char_details_trimmed = self._trim_lines_to_budget(char_details, budget_chars)
-        
-        # B. RAG 历史记忆 (针对 Outline 的情节)
-        # 这里我们检索稍微多一点，然后裁剪
-        rag_content = self.memory.query_related_context(outline, k=8)
-        rag_trimmed = self._trim_lines_to_budget(rag_content, budget_rag)
-        
-        # C. 社交图谱 (Social Graph)
+        # B. 关系深度检索 (Graph RAG)
         graph_info = ""
-        for name in active_characters:
-            g = self.memory.get_social_graph(name, current_chapter=chapter_num)
-            if "暂无" not in g:
-                graph_info += f"[{name}的网络]:\n{g}\n"
-        graph_trimmed = self._trim_lines_to_budget(graph_info, budget_graph)
-
-        retrieval_text = f"""
-# 🧠 检索层 (Retrieval Context)
-
-## 关键角色档案 (动态)
-{char_details_trimmed}
-
-## 相关历史记忆 (RAG)
-{rag_trimmed}
-
-## 社交关系网 (Graph)
-{graph_trimmed}
-"""
+        if intent["needs_relations"] or intent["type"] == "dialogue":
+            graph_info = "# 🕸️ 社交深度连接\n"
+            for char_name in active_characters:
+                # 获取 2 度以内的重要关系路径
+                graph_info += self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
         
-        # 文风样板 retrieval (Context-Aware)
-        style_tags = []
-        if atmosphere:
-            # 简单的映射逻辑，或是直接使用 tone
-            tone = atmosphere.get('tone', '')
-            if tone: style_tags.append(tone)
-            # 可以扩展更多映射，例如 'Tense' -> 'Action'
-            if 'Tense' in tone or 'Dark' in tone:
-                style_tags.append('Action')
-                style_tags.append('Suspense')
-            elif 'Warm' in tone:
-                style_tags.append('Dialogue')
-        
-        style_text = self.memory.get_style_examples(tags=style_tags)
+        # C. 历史记忆碎片 (Dynamic RAG)
+        # 检索策略改进：如果是在战斗，搜“招式、战绩”；如果是文戏，搜“恩怨、对话往来”
+        rag_query = f"{' '.join(active_characters)} "
+        if intent["type"] == "combat":
+            rag_query += f"战斗 招式 伤痕 {outline[:30]}"
+        elif intent["type"] == "dialogue":
+            rag_query += f"情感 矛盾 承诺 {outline[:30]}"
+        else:
+            rag_query += outline
 
-        # --- Final Assembly ---
-        # Bible 放在最前面!
-        # Bible -> Global -> Local -> Retrieval
-        full_context = f"{bible_text}\n{global_text}\n{local_text}\n{style_text}\n{retrieval_text}"
-        return full_context
+        rag_content = self.memory.query_related_context(rag_query, k=10)
+        
+        # --- 4. Assembly & Trimming ---
+        retrieval_text = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片\n{rag_content}"
+        retrieval_trimmed = self._trim_lines_to_budget(retrieval_text, retrieval_budget)
+
+        # 获取文风样板
+        style_text = self.memory.get_style_examples(tags=[intent["type"]])
+
+        return f"{bible_text}\n{state_text}\n{style_text}\n{retrieval_trimmed}"

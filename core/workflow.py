@@ -33,6 +33,8 @@ class NovelState(TypedDict):
     # Flags
     director_ran: bool
 
+from agents.foreshadowing_agent import ForeshadowingAgent
+
 # --- Node Logic ---
 
 class NovelWorkflow:
@@ -47,6 +49,7 @@ class NovelWorkflow:
         self.writer = WriterAgent()
         self.reviewer = ReviewerAgent(memory)
         self.archivist = ArchivistAgent(memory)
+        self.foreshadowing_agent = ForeshadowingAgent(memory)
 
     def node_director_check(self, state: NovelState) -> NovelState:
         """Node 1: Director Check (Strategic Control)"""
@@ -71,17 +74,24 @@ class NovelWorkflow:
         print(f"\n📝 === Workflow: Editor Planning ===")
         
         # 1. Build Context
-        # Editor 既需要宏观把控（Director Context），也需要全局花名册（Roster）
         base_context = self.context_manager.build_director_context(state["chapter_num"])
         roster = self.memory.get_character_roster_brief()
         
+        # 2. Get Foreshadowing Suggestions
+        # 假设当前地点可能沿用上一章的，或者为空（由 Editor 决定）
+        # 这里我们只传入 chapter_num，让 Agent 检查所有伏笔
+        hook_suggestions = self.foreshadowing_agent.suggest_callbacks(state["chapter_num"], current_location=None)
+
         full_context = f"""
 {base_context}
 
 ## 5. 角色分布 (Roster)
 {roster}
 
-## 6. 上一轮模拟反馈 (如果有)
+## 6. 伏笔回收建议 (Callbacks)
+{hook_suggestions}
+
+## 7. 上一轮模拟反馈 (如果有)
 {state.get('simulator_feedback', '无')}
 """
         
@@ -153,7 +163,13 @@ class NovelWorkflow:
     def node_archivist_save(self, state: NovelState) -> NovelState:
         """Node 5: Archivist (Persistence)"""
         print(f"\n🗄️ === Workflow: Archiving ===")
+        # 1. 基础归档 (Fact Extraction)
         self.archivist.archive_chapter(state["draft_content"], state["chapter_num"])
+        
+        # 2. 深度伏笔分析 (Clue Hunting)
+        # Archivist 虽然也提取伏笔，但 ForeshadowingAgent 更专业，且负责更新状态
+        self.foreshadowing_agent.analyze_hooks(state["draft_content"], state["chapter_num"])
+        
         state["final_content"] = state["draft_content"]
         return state
 
