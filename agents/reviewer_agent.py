@@ -34,7 +34,7 @@ class ReviewerAgent:
         
         # 2. 执行检索与去重
         for q in queries:
-            docs = self.memory.search_related_docs(q, k=2) # 每个点查 2 条
+            docs = self.memory.similarity_search(q, k=2) # 每个点查 2 条
             for doc in docs:
                 # 简单去重：使用内容的前50个字符作为指纹（实际可用 hash）
                 doc_id = hash(doc.page_content)

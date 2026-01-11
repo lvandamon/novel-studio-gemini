@@ -1,300 +1,300 @@
 import streamlit as st
 import os
-import re
-import json
+import time
+import tempfile
 import pandas as pd
+import streamlit.components.v1 as components
+from pyvis.network import Network
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from core.memory import MemoryManager
 from core.context_manager import ContextManager
-from core.prompts import MASTER_SYSTEM_PROMPT
 from agents.writer_agent import WriterAgent
 from agents.editor_agent import EditorAgent
 from agents.archivist_agent import ArchivistAgent
 from agents.reviewer_agent import ReviewerAgent
 from agents.foreshadowing_agent import ForeshadowingAgent
 
-# --- 0. 全局配置 ---
+# --- 0. 全局配置 & 样式 ---
 st.set_page_config(
-    page_title="DeepSeek Novel Studio - 清风揽岳", 
+    page_title="DeepSeek Novel Studio Pro", 
     page_icon="🏔️", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+st.markdown("""
+<style>
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #ffffff; border-bottom: 2px solid #ff4b4b; }
+    .reportview-container .main .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 2rem; }
+    div[data-testid="stExpander"] div[role="button"] p { font-size: 1.1rem; font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
+
 load_dotenv()
 
-# --- 1. 资源与状态初始化 (Cached) ---
-
+# --- 1. 核心单例模式 (Singleton Resource) ---
 @st.cache_resource
-def get_memory_manager():
-    return MemoryManager()
-
-@st.cache_resource
-def get_agents(_memory):
-    return {
+def get_system_core():
+    """初始化所有后端组件，全局唯一"""
+    print("🚀 初始化 System Core...")
+    memory = MemoryManager()
+    ctx_mgr = ContextManager(memory)
+    agents = {
         "editor": EditorAgent(),
         "writer": WriterAgent(),
-        "reviewer": ReviewerAgent(_memory),
-        "archivist": ArchivistAgent(_memory),
-        "fore_shadow": ForeshadowingAgent(_memory)
+        "reviewer": ReviewerAgent(memory),
+        "archivist": ArchivistAgent(memory),
+        "foreshadow": ForeshadowingAgent(memory)
     }
+    return memory, ctx_mgr, agents
 
-@st.cache_resource
-def get_context_manager(_memory):
-    return ContextManager(_memory)
+memory, context_manager, agents = get_system_core()
 
-# 获取核心实例
-memory = get_memory_manager()
-context_manager = get_context_manager(memory)
-agents = get_agents(memory)
+# --- 2. Session State 管理 (状态机) ---
+# Workflow Stages: 0:Idle -> 1:Outline -> 2:Writing -> 3:Review -> 4:Archived
+if "wf_stage" not in st.session_state: st.session_state.wf_stage = 0
+if "current_chapter" not in st.session_state: st.session_state.current_chapter = 1
 
-# 初始化 Session State
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "current_outline" not in st.session_state:
-    st.session_state.current_outline = None
-if "current_chapter_text" not in st.session_state:
-    st.session_state.current_chapter_text = ""
-if "current_review" not in st.session_state:
-    st.session_state.current_review = ""
-if "generation_log" not in st.session_state:
-    st.session_state.generation_log = [] # 记录生成过程的日志
+# Data Buffers (用于在不同阶段间传递数据)
+if "buf_outline" not in st.session_state: st.session_state.buf_outline = {}
+if "buf_content" not in st.session_state: st.session_state.buf_content = ""
+if "buf_review" not in st.session_state: st.session_state.buf_review = ""
 
-# --- 2. 辅助函数 ---
+# UI Logs
+if "logs" not in st.session_state: st.session_state.logs = []
 
-def log_to_ui(message, level="info"):
-    """将后台日志推送到前端 session"""
-    icon = "ℹ️"
-    if level == "success": icon = "✅"
-    elif level == "warning": icon = "⚠️"
-    elif level == "error": icon = "❌"
-    elif level == "thinking": icon = "🧠"
-    elif level == "writing": icon = "✍️"
-    
-    st.session_state.generation_log.append(f"{icon} {message}")
+def add_log(msg, level="info"):
+    icon_map = {"info": "ℹ️", "success": "✅", "warn": "⚠️", "error": "❌", "ai": "🤖"}
+    st.session_state.logs.append(f"{icon_map.get(level, '')} {msg}")
 
-def get_chat_llm():
-    return ChatOpenAI(
-        model="deepseek-chat",
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-        base_url="https://api.deepseek.com/v1",
-        temperature=0.7,
-        streaming=True
-    )
-
-def handle_generate_chapter(chapter_num: int):
-    """核心工作流：生成指定章节"""
-    st.session_state.generation_log = [] # 清空日志
-    progress_bar = st.progress(0, text="启动引擎...")
-    
-    try:
-        # 0. 准备阶段
-        log_to_ui(f"开始生成第 {chapter_num} 章...", "info")
-        prev_summary = memory.get_chapter_summary(chapter_num - 1)
-        if prev_summary == "暂无摘要。": prev_summary = "（首章或无前情，自动推演）"
-        
-        # 1. Editor (R1) - 制定大纲
-        progress_bar.progress(20, text="DeepSeek-R1: 正在思考叙事节拍与细纲...")
-        log_to_ui("主编正在审视全局状态 (Focus) 与历史记忆...", "thinking")
-        
-        editor_ctx = context_manager.build_editor_context(chapter_num, prev_summary)
-        outline_data = agents["editor"].generate_outline(editor_ctx, chapter_num)
-        
-        st.session_state.current_outline = outline_data # 存入 State
-        log_to_ui(f"大纲已锁定: {outline_data.get('title', '无标题')}", "success")
-        log_to_ui(f"叙事重心: {outline_data.get('narrative_focus', 'N/A')}", "info")
-        
-        # 2. Writer (V3) - 撰写正文
-        progress_bar.progress(50, text="DeepSeek-V3: 正在挥毫泼墨...")
-        log_to_ui("作家正在根据大纲和联想记忆进行创作...", "writing")
-        
-        writer_ctx = context_manager.build_writer_context(
-            str(outline_data.get('outline', '')), 
-            outline_data.get('active_characters', [])
-        )
-        content = agents["writer"].write_chapter(str(outline_data.get('outline', '')), writer_ctx)
-        
-        st.session_state.current_chapter_text = f"# 第 {chapter_num} 章 {outline_data.get('title', '')}\n\n{content}"
-        log_to_ui(f"正文创作完成，共 {len(content)} 字。", "success")
-        
-        # 3. Reviewer (R1) - 审核
-        progress_bar.progress(70, text="DeepSeek-R1: 毒舌书评人正在挑刺...")
-        log_to_ui("书评人正在进行逻辑一致性检查...", "thinking")
-        
-        feedback = agents["reviewer"].review_draft(content)
-        st.session_state.current_review = feedback
-        
-        if "PASS" in feedback.upper():
-            log_to_ui("审核通过！逻辑自洽。", "success")
-        else:
-            log_to_ui("审核提出修改意见 (已记录)", "warning")
-            
-        # 4. Archivist & Foreshadowing (V3) - 归档
-        progress_bar.progress(90, text="DeepSeek-V3: 正在整理档案与伏笔...")
-        log_to_ui("正在提取新设定与事件...", "info")
-        
-        agents["archivist"].archive_chapter(content, chapter_num)
-        hook_data = agents["fore_shadow"].analyze_hooks(content, chapter_num)
-        
-        new_clues = hook_data.get("new_clues", [])
-        if new_clues:
-            for clue in new_clues:
-                log_to_ui(f"埋下新伏笔: {clue}", "warning")
-                
-        # 简单更新摘要 (实际可用 Summarizer)
-        memory.update_chapter_summary(chapter_num, f"{outline_data.get('title')} - 详情见正文")
-        
-        progress_bar.progress(100, text="完成")
-        st.toast(f"第 {chapter_num} 章生成完毕！")
-        
-    except Exception as e:
-        log_to_ui(f"生成过程出错: {str(e)}", "error")
-        st.error(f"Error: {e}")
-        import traceback
-        print(traceback.format_exc())
-
-# --- 3. 界面布局 ---
-
-# Header
-st.title("🏔️ DeepSeek Novel Studio")
-st.caption("基于 DeepSeek R1/V3 双模型的长篇小说创作系统 | 动态记忆 | 节拍控制 | 自动归档")
-
-# Sidebar: Controls
+# --- 3. Sidebar: 全局控制台 ---
 with st.sidebar:
-    st.header("🎛️ 控制台")
-    api_key = st.text_input("DeepSeek API Key", value=os.environ.get("DEEPSEEK_API_KEY", ""), type="password")
+    st.title("🏔️ Novel Studio")
+    st.caption("DeepSeek R1/V3 Dual-Core Engine")
+    
+    api_key = st.text_input("API Key", type="password", value=os.getenv("DEEPSEEK_API_KEY", ""))
     if api_key: os.environ["DEEPSEEK_API_KEY"] = api_key
     
-    st.markdown("---")
-    st.subheader("📚 连载管理")
-    # 自动计算下一章章节号
-    # (简单起见，这里手动输入，未来可以从 DB 读取 max chapter)
-    target_chapter = st.number_input("目标章节号", min_value=1, value=1)
+    st.divider()
     
-    if st.button("🚀 生成该章节", type="primary", use_container_width=True):
-        if not api_key:
-            st.error("请先设置 API Key")
-        else:
-            handle_generate_chapter(target_chapter)
-            
-    st.markdown("---")
-    st.subheader("🛠️ 调试工具")
-    if st.button("🧹 重置所有数据 (慎用)"):
-        # 简单粗暴删文件
-        try:
-            if os.path.exists("data/novel.db"): os.remove("data/novel.db")
-            import shutil
-            if os.path.exists("data/vector_store"): shutil.rmtree("data/vector_store")
-            st.cache_resource.clear()
-            st.success("数据已清空，请刷新页面。")
-        except Exception as e:
-            st.error(f"清空失败: {e}")
-
-# Main Area
-col_left, col_right = st.columns([0.4, 0.6])
-
-# --- 左侧：战略视图 (Dashboard & Chat) ---
-with col_left:
-    # 1. 顶部仪表盘 (Dashboard)
-    st.subheader("📊 叙事仪表盘 (Narrative Dashboard)")
+    # 状态监控
     focus = memory.get_narrative_focus()
+    st.markdown(f"**Current**: 第 {st.session_state.current_chapter} 章")
+    st.info(f"📅 {focus.get('date', '未知日期')}")
     
-    # 使用 Metric 卡片展示关键信息
-    m1, m2 = st.columns(2)
-    m1.metric("当前卷 (Volume)", focus.get("volume", "未定义"))
-    m2.metric("当前单元 (Arc)", focus.get("arc", "未定义"))
+    with st.expander("🌍 世界状态 (World State)", expanded=False):
+        st.write(f"**卷**: {focus.get('volume')}")
+        st.write(f"**节拍**: {focus.get('beat')}")
+        st.write(f"**冲突**: {focus.get('conflict')}")
     
-    st.info(f"**当前节拍 (Beat)**: {focus.get('beat', '未定义')}")
-    st.warning(f"**核心冲突**: {focus.get('conflict', 'N/A')}")
+    st.divider()
     
-    with st.expander("查看完整世界状态"):
-        st.write(f"**当前目标**: {focus.get('goal')}")
-        st.write(f"**世界动态**: {focus.get('state')}")
+    # 工具栏
+    if st.button("🧹 清空当前 Session"):
+        # for k in list(st.session_state.keys()):
+        #     del st.session_state[k]
+        st.session_state.clear()
+        st.rerun()
+
+# --- 4. Main Interface ---
+
+st.title(f"Chapter {st.session_state.current_chapter}: {focus.get('volume', '新篇章')}")
+
+# 进度条
+steps = ["1. 构思 (Outline)", "2. 撰写 (Draft)", "3. 审核 (Review)", "4. 归档 (Archive)"]
+current_step_idx = max(0, min(st.session_state.wf_stage - 1, 3)) if st.session_state.wf_stage > 0 else 0
+st.progress((current_step_idx + 1) / 4, text=f"当前阶段: {steps[current_step_idx]}")
+
+# 主要工作区
+tab_main, tab_db, tab_settings = st.tabs(["📝 创作流", "🗃️ 档案室", "⚙️ 设置"])
+
+# === Tab 1: 创作流 (The Workflow) ===
+with tab_main:
+    
+    # Stage 0: 准备
+    if st.session_state.wf_stage == 0:
+        st.info("👋 准备好开始写下一章了吗？")
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            chap_num = st.number_input("章节号", value=st.session_state.current_chapter)
+        with col2:
+            st.write(" ") # Spacer
+            if st.button("🚀 启动创作引擎 (Start Engine)", type="primary"):
+                st.session_state.current_chapter = chap_num
+                st.session_state.wf_stage = 1
+                st.rerun()
+
+    # Stage 1: 大纲 (Outline)
+    elif st.session_state.wf_stage == 1:
+        st.subheader("Step 1: 构思大纲 (Editor Agent)")
         
-    st.markdown("---")
-    
-    # 2. 对话助手 (Chat)
-    st.subheader("💬 创作助理 (Chat Assistant)")
-    chat_container = st.container(height=400)
-    
-    # 初始化欢迎语
-    if not st.session_state.messages:
-        st.session_state.messages.append({"role": "assistant", "content": "我是清风揽岳。您可以直接在上方点击【生成章节】，或在这里与我讨论剧情。"})
+        # Action Area
+        col_act, col_view = st.columns([1, 2])
+        
+        with col_act:
+            st.markdown("主编 (DeepSeek-R1) 将根据前情提要和节拍生成细纲。")
+            if st.button("💡 生成/重生成大纲"):
+                with st.spinner("主编正在思考..."):
+                    prev_sum = memory.get_chapter_summary(st.session_state.current_chapter - 1)
+                    ctx = context_manager.build_editor_context(st.session_state.current_chapter, prev_sum)
+                    outline = agents["editor"].generate_outline(ctx, st.session_state.current_chapter)
+                    st.session_state.buf_outline = outline
+                    add_log("大纲已生成", "success")
+            
+            if st.session_state.buf_outline:
+                st.divider()
+                st.success("大纲就绪！")
+                if st.button("✅ 确认并进入撰写阶段", type="primary"):
+                    st.session_state.wf_stage = 2
+                    st.rerun()
 
-    with chat_container:
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        with col_view:
+            if st.session_state.buf_outline:
+                # 允许用户编辑大纲
+                new_title = st.text_input("章节标题", value=st.session_state.buf_outline.get("title", ""))
                 
-    if prompt := st.chat_input("输入剧情想法或指令..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with chat_container:
-            st.chat_message("user").markdown(prompt)
-            
-        # 简单对话逻辑 (不涉及复杂 Agent 调用，仅作为陪聊)
-        # 如果需要复杂功能，这里应该调用 Master Agent
-        llm = get_chat_llm()
-        try:
-            history = [SystemMessage(content=MASTER_SYSTEM_PROMPT)] + \
-                      [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"]) for m in st.session_state.messages]
-            
-            with st.chat_message("assistant"):
-                stream = llm.stream(history)
-                response = st.write_stream(stream)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-        except Exception as e:
-            st.error(f"对话出错: {e}")
-
-
-# --- 右侧：战术视图 (Tactical View) ---
-with col_right:
-    st.subheader("📝 创作工作台")
-    
-    # 使用 Tabs 分隔不同层级的信息
-    tab_log, tab_content, tab_outline, tab_data = st.tabs(["⚡️ 生成日志", "📄 正文预览", "📋 章节大纲", "🗃️ 资料库"])
-    
-    with tab_log:
-        st.caption("系统运行实时日志")
-        if st.session_state.generation_log:
-            for log in st.session_state.generation_log:
-                st.markdown(log)
-        else:
-            st.info("暂无生成日志，请点击左侧【生成该章节】开始。")
-            
-    with tab_content:
-        if st.session_state.current_chapter_text:
-            st.markdown(st.session_state.current_chapter_text)
-            if st.session_state.current_review:
-                with st.expander("🧐 查看审核报告"):
-                    st.markdown(st.session_state.current_review)
-        else:
-            st.write("暂无正文内容。")
-            
-    with tab_outline:
-        if st.session_state.current_outline:
-            st.json(st.session_state.current_outline)
-        else:
-            st.write("暂无大纲数据。")
-            
-    with tab_data:
-        # 展示角色和伏笔
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            st.markdown("**👥 角色列表**")
-            chars = memory.get_all_characters_list()
-            if chars:
-                df = pd.DataFrame(chars)
-                st.dataframe(df[["name", "role", "status"]], hide_index=True)
-            else:
-                st.caption("无数据")
+                # 处理 outline 字段可能是 list 或 str
+                raw_outline = st.session_state.buf_outline.get("outline", "")
+                if isinstance(raw_outline, list):
+                    raw_outline = "\n".join(raw_outline)
                 
-        with col_d2:
-            st.markdown("**🎣 活跃伏笔**")
-            hooks = memory.get_active_foreshadowing()
-            if hooks:
-                for h in hooks:
-                    st.markdown(f"- [第{h['chapter']}章] {h['content']}")
+                new_outline_text = st.text_area("大纲内容 (可编辑)", value=raw_outline, height=300)
+                
+                # 实时回写
+                st.session_state.buf_outline["title"] = new_title
+                st.session_state.buf_outline["outline"] = new_outline_text
+
+    # Stage 2: 撰写 (Writing)
+    elif st.session_state.wf_stage == 2:
+        st.subheader("Step 2: 撰写正文 (Writer Agent)")
+        
+        col_act, col_view = st.columns([1, 2])
+        
+        with col_act:
+            st.markdown("作家 (DeepSeek-V3) 将基于大纲进行扩写。")
+            
+            # 上下文预览
+            with st.expander("查看参考资料包"):
+                active_chars = st.session_state.buf_outline.get("active_characters", [])
+                st.write(f"**在场角色**: {active_chars}")
+            
+            if st.button("✍️ 生成初稿"):
+                with st.spinner("作家正在挥毫泼墨..."):
+                    outline_str = st.session_state.buf_outline.get("outline", "")
+                    active_chars = st.session_state.buf_outline.get("active_characters", [])
+                    
+                    writer_ctx = context_manager.build_writer_context(str(outline_str), active_chars)
+                    content = agents["writer"].write_chapter(str(outline_str), writer_ctx)
+                    st.session_state.buf_content = content
+                    add_log(f"正文生成完毕 ({len(content)}字)", "success")
+            
+            if st.session_state.buf_content:
+                st.divider()
+                if st.button("🔍 提交审核", type="primary"):
+                    st.session_state.wf_stage = 3
+                    st.rerun()
+
+        with col_view:
+            if st.session_state.buf_content:
+                new_content = st.text_area("正文编辑器", value=st.session_state.buf_content, height=600)
+                st.session_state.buf_content = new_content
             else:
-                st.caption("无数据")
+                st.info("等待生成正文...")
+
+    # Stage 3: 审核 (Review)
+    elif st.session_state.wf_stage == 3:
+        st.subheader("Step 3: 质量审核 (Reviewer Agent)")
+        
+        col_act, col_view = st.columns([1, 2])
+        
+        with col_act:
+            if not st.session_state.buf_review:
+                if st.button("🧐 开始审核"):
+                    with st.spinner("书评人正在挑刺..."):
+                        feedback = agents["reviewer"].review_draft(st.session_state.buf_content)
+                        st.session_state.buf_review = feedback
+                        add_log("审核完成", "success")
+            
+            if st.session_state.buf_review:
+                is_pass = "PASS" in st.session_state.buf_review.upper()
+                if is_pass:
+                    st.success("审核通过！")
+                else:
+                    st.warning("发现潜在问题")
+                
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    if st.button("🔙 返回修改"):
+                        st.session_state.wf_stage = 2
+                        st.session_state.buf_review = "" # 清除审核记录以便重审
+                        st.rerun()
+                with col_b2:
+                    if st.button("📦 强制归档", type="primary"):
+                        st.session_state.wf_stage = 4
+                        st.rerun()
+
+        with col_view:
+            st.markdown("### 正文预览")
+            st.text_area("正文内容", value=st.session_state.buf_content, height=200, disabled=True)
+            
+            if st.session_state.buf_review:
+                st.markdown("### 审核报告")
+                st.info(st.session_state.buf_review)
+
+    # Stage 4: 归档 (Archiving)
+    elif st.session_state.wf_stage == 4:
+        st.subheader("Step 4: 自动归档 (Archivist Agent)")
+        
+        if st.button("💾 执行归档入库"):
+            with st.spinner("正在提取数据、构建图谱、更新世界..."):
+                try:
+                    agents["archivist"].archive_chapter(st.session_state.buf_content, st.session_state.current_chapter)
+                    add_log("归档完成", "success")
+                    st.balloons()
+                    
+                    # Reset for next chapter
+                    time.sleep(2)
+                    st.session_state.current_chapter += 1
+                    st.session_state.wf_stage = 0
+                    st.session_state.buf_outline = {}
+                    st.session_state.buf_content = ""
+                    st.session_state.buf_review = ""
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"归档失败: {e}")
+
+# === Tab 2: 档案室 (Database) ===
+with tab_db:
+    col_db1, col_db2 = st.columns([1, 1])
+    
+    with col_db1:
+        st.markdown("### 👥 角色花名册")
+        chars = memory.get_all_characters_list()
+        if chars:
+            st.dataframe(pd.DataFrame(chars))
+            
+    with col_db2:
+        st.markdown("### 🕸️ 关系图谱")
+        if st.button("🔄 刷新图谱"):
+            graph_data = memory.get_visual_graph_data()
+            if graph_data["nodes"]:
+                net = Network(height="400px", width="100%", bgcolor="#ffffff", font_color="black")
+                for n in graph_data["nodes"]:
+                    net.add_node(n["id"], label=n["label"], color=n["color"], group=n["group"])
+                for e in graph_data["edges"]:
+                    net.add_edge(e["from"], e["to"], label=e["label"])
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+                    net.save_graph(tmp.name)
+                    with open(tmp.name, 'r', encoding='utf-8') as f:
+                        components.html(f.read(), height=420)
+
+# === Tab 3: 设置 (Settings) ===
+with tab_settings:
+    st.markdown("### 🛠️ 系统维护")
+    if st.button("⚠️ 重置 Narrative Focus (慎点)"):
+        # Reset logic here
+        pass

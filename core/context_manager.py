@@ -8,80 +8,81 @@ class ContextManager:
     def build_editor_context(self, chapter_num: int, summary: str) -> str:
         """
         为 Editor (主编) 组装上下文。
-        Editor 需要宏观视角，因此侧重于：全局目标 + 上一章摘要 + 简单的角色状态 + 未回收的伏笔。
         """
-        # 1. Global Context (Tier 1) - 动态从数据库获取
+        # 1. Global Context
         focus = self.memory.get_narrative_focus()
         pacing_warning = ""
         if focus.get('chapters_since_last_beat', 0) >= 3:
-            pacing_warning = f"\n⚠️ 【节奏警告】：当前节拍已持续 {focus['chapters_since_last_beat']} 章，剧情可能开始拖沓，请务必在本章引入新的变量或加速向下一节拍过渡！"
+            pacing_warning = f"\n⚠️ 【节奏警告】：当前节拍已持续 {focus['chapters_since_last_beat']} 章，请加速！"
 
         global_context = f"""
-【当前卷】：{focus['volume']}
-【当前单元 (Arc)】：{focus['arc']}
-【当前节拍 (Beat)】：{focus['beat']} {pacing_warning}
+【当前进度】：第 {chapter_num} 章 (位于 {focus['volume']} / {focus['arc']})
+【当前节拍】：{focus['beat']} {pacing_warning}
 【本单元目标】：{focus['goal']}
 【核心冲突】：{focus['conflict']}
 【世界动态】：{focus['state']}
 """
         
-        # 2. Roster (Tier 3) - 让 Editor 知道有哪些人可用
+        # 2. Roster - Editor 看到按地点分组的全景
         roster = self.memory.get_character_roster_brief()
         
-        # 3. Foreshadowing (Tier 1.5) - 提醒填坑
+        # 3. Foreshadowing
         active_hooks = self.memory.get_active_foreshadowing()
-        if active_hooks:
-            hooks_text = "\n".join([f"- [ID:{h['id']}] {h['content']}" for h in active_hooks])
-            hooks_section = f"【待回收伏笔 (请尝试推进)】：\n{hooks_text}"
-        else:
-            hooks_section = "【待回收伏笔】：暂无。"
+        hooks_text = "\n".join([f"- [ID:{h['id']}] {h['content']}" for h in active_hooks]) if active_hooks else "暂无。"
         
         return f"""
 {global_context}
 
-{hooks_section}
+【待回收伏笔】：
+{hooks_text}
 
-【可用角色花名册】：
+【全球角色地理分布】：
 {roster}
 
 【前情提要 (第 {chapter_num - 1} 章)】：
 {summary}
 """
 
-    def build_writer_context(self, outline: str, active_characters: List[str]) -> str:
+    def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str = "未知") -> str:
         """
         为 Writer (作家) 组装上下文。
-        Writer 需要微观细节，因此侧重于：在场角色详情 + RAG 检索的场景记忆。
         """
-        # 1. Tier 1: Global Context (简略版，提醒基调 + 当前目标)
+        # 1. Global Tier
         focus = self.memory.get_narrative_focus()
         global_tier = f"""
-【世界观基调】：修仙、残酷、凡人流。核心规则：境界压制不可逆。
-【当前进度】：{focus['arc']} -> {focus['beat']}
-【当前焦点】：{focus['goal']} (冲突：{focus['conflict']})
+【世界观基调】：修仙、残酷、凡人流。
+【当前目标】：{focus['goal']}
+【当前场景】：{scene_location}
 """
 
-        # 2. Tier 2: Active Characters (在场角色 - 详细)
-        # 只有大纲里提到的人，才加载详细卡片
-        # [升级] 将 outline 作为 query 传入，激活混合检索
+        # 2. Tier 2: Active Characters (详细档案)
         active_char_details = self.memory.get_character_details(active_characters, query=outline)
+        
+        # 3. Tier 3: Social Graph (基于真实章节号的过滤)
+        social_graph_info = ""
+        for name in active_characters:
+            graph_data = self.memory.get_social_graph(name, current_chapter=chapter_num)
+            if graph_data and "暂无" not in graph_data and "未连接" not in graph_data:
+                social_graph_info += f"--- {name} 的人际关系网 (截至第 {chapter_num} 章) ---\n{graph_data}\n"
 
-        # 3. Tier 3: Roster (不在场角色 - 仅名字，防幻觉)
-        roster = self.memory.get_character_roster_brief()
+        # 4. Tier 4: Local Roster (地理围栏)
+        local_roster = self.memory.get_local_roster(current_location=scene_location)
 
-        # 4. Tier 4: RAG Memory (相关环境/设定)
-        # 使用大纲内容作为 Query 去检索之前的伏笔或设定
-        rag_context = self.memory.query_related_context(outline, k=2)
+        # 5. Tier 5: RAG Memory (混合检索)
+        rag_context = self.memory.query_related_context(outline, k=5)
 
         return f"""
 {global_tier}
 
-【在场角色详情 (重点参考)】：
+【在场角色详细档案】：
 {active_char_details}
 
-【其他已知角色 (仅供提及)】：
-{roster}
+【人物关系图谱 (逻辑一致性)】：
+{social_graph_info}
 
-【相关历史记忆/设定】：
+【本地及重要人物名单】：
+{local_roster}
+
+【相关历史记忆/伏笔】：
 {rag_context}
 """
