@@ -47,10 +47,17 @@ class DirectorAgent:
         focus = self.memory.get_narrative_focus()
 
         # Chaos Check
-        # TODO: 从 Reviewer 或 Memory 获取真实的 tension，目前暂时模拟为 0.5 或随机
-        # 为了演示效果，我们假设 tension 随 chapter 波动
-        simulated_tension = (current_chapter % 10) / 10.0 
-        chaos_card = self.chaos_engine.roll_for_chaos(current_chapter, current_tension=simulated_tension)
+        # 从 Memory 获取上一章真实的 tension (Narrative Telemetry)
+        metrics_history = self.memory.get_metrics_history(limit=1)
+        if metrics_history:
+            # 取最近一章的张力值，并归一化到 0.0 - 1.0
+            last_chapter_data = metrics_history[-1]
+            real_tension = last_chapter_data.get("tension", 50) / 100.0
+            print(f"   📊 Director: 检测到上一章真实张力为 {real_tension:.2f}")
+        else:
+            real_tension = 0.5 # 默认中等张力
+            
+        chaos_card = self.chaos_engine.roll_for_chaos(current_chapter, current_tension=real_tension)
         
         chaos_prompt_injection = ""
         if chaos_card:
@@ -112,8 +119,9 @@ class DirectorAgent:
                 "current_chapter": current_chapter,
                 "chapters_used": chapters_used,
                 "end_chapter_estimated": arc_data.get("end_chapter_estimated", "未设定"),
-                "recent_summaries": full_history_context, # 传入分级历史
-                "current_focus": json.dumps(focus, ensure_ascii=False) + chaos_prompt_injection # 注入混沌
+                "recent_summaries": full_history_context, 
+                "current_focus": json.dumps(focus, ensure_ascii=False),
+                "chaos_injection": chaos_prompt_injection 
             })
             
             # 3. 解析结果 (Robust)

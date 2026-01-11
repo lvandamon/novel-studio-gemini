@@ -217,7 +217,25 @@ class ContextManager:
         retrieval_text = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片\n{rag_content}"
         retrieval_trimmed = self._trim_lines_to_budget(retrieval_text, retrieval_budget)
 
-        # 获取文风样板
-        style_text = self.memory.get_style_examples(tags=[intent["type"]])
+        # 获取文风样板 (Mapped from Intent)
+        style_map = {
+            "combat": ["Action", "Scenery"],
+            "dialogue": ["Dialogue", "InnerMonologue"],
+            "revelation": ["InnerMonologue", "Scenery"],
+            "general": ["Scenery", "Dialogue"]
+        }
+        target_styles = style_map.get(intent["type"], ["Scenery"])
+        style_text = self.memory.get_style_examples(tags=target_styles)
 
-        return f"{bible_text}\n{state_text}\n{style_text}\n{retrieval_trimmed}"
+        # 格式化氛围要求
+        atmosphere_text = ""
+        if atmosphere:
+            atmosphere_text = f"""
+# 🌡️ 本章氛围 (Atmosphere)
+- 基调 (Tone): {atmosphere.get('tone', 'N/A')}
+- 紧张度 (Tension): {atmosphere.get('tension', 'N/A')}
+- 感官侧重 (Sensory): {atmosphere.get('sensory_focus', 'N/A')}
+- 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
+"""
+
+        return f"{bible_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_trimmed}"
