@@ -13,12 +13,20 @@ class ReviewerAgent:
         self.chain = REVIEWER_CHECK_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
 
-    def _clean_think(self, text: str) -> str:
-        return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    def _clean_json(self, text: str) -> str:
+        # Remove <think> blocks
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # Strip markdown
+        text = text.replace("```json", "").replace("```", "").strip()
+        # Find JSON block
+        match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if match:
+            return match.group(1)
+        return text
 
-    def review_draft(self, content: str, active_characters: List[str] = None) -> str:
+    def review_draft(self, content: str, chapter_num: int, active_characters: List[str] = None) -> str:
         """
-        审核章节内容，检查逻辑冲突。
+        审核章节内容，检查逻辑冲突并记录遥测数据。
         返回: "PASS" 或 修改建议文本。
         """
         print(f"🧐 Reviewer: 正在进行逻辑审计 (DeepSeek-R1)...")
@@ -29,13 +37,8 @@ class ReviewerAgent:
             active_characters = [name for name in all_chars if name in content]
         
         # 2. 获取上下文资料
-        # A. 世界圣经 (最高优先级)
         bible_context = self.memory.get_bible_context(query=content[:500], active_entities=active_characters)
-        
-        # B. 硬逻辑快照 (状态、位置、物品)
         hard_logic_snapshot = self.memory.get_hard_logic_snapshot(active_characters)
-        
-        # C. 相关历史记忆 (RAG)
         memory_context = self.memory.query_related_context(content[:500], k=5)
 
         try:
@@ -53,16 +56,33 @@ class ReviewerAgent:
                 "content": content
             })
             
-            # 清理思考过程
-            result = self._clean_think(response)
+            # 3. 解析结果
+            clean_res = self._clean_json(response)
+            result_data = json.loads(clean_res)
             
-            if "PASS" in result.upper() and len(result) < 20:
-                print("   ✅ Reviewer: 逻辑自洽，审核通过。 ")
+            # 4. 记录遥测数据
+            metrics = result_data.get("metrics", {})
+            metrics["critique"] = result_data.get("critique", "")
+            
+            self.memory.log_chapter_metrics(chapter_num, metrics)
+            
+            status = result_data.get("status", "PASS")
+            
+            if status == "PASS":
+                print(f"   ✅ Reviewer: 审核通过 (Score: {metrics.get('plot_logic_score')})")
                 return "PASS"
             else:
-                print(f"   🚩 Reviewer: 发现逻辑隐患！")
-                return result
+                suggestion = result_data.get("suggestion", "请修改逻辑漏洞。")
+                print(f"   🚩 Reviewer: 发现隐患! -> {suggestion}")
+                return suggestion
 
+        except json.JSONDecodeError:
+            print(f"   ⚠️ Reviewer JSON 解析失败，回退到原始文本检查。")
+            # Fallback simple check (if model failed to output JSON)
+            if "PASS" in response and len(response) < 50:
+                return "PASS"
+            return response
+            
         except Exception as e:
             print(f"   ⚠️ Reviewer 审计中断: {e}")
             return "PASS"

@@ -13,7 +13,7 @@ class DirectorAgent:
         self.llm = get_deepseek_reasoner() 
         self.chain = DIRECTOR_EVALUATE_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
-        self.chaos_engine = ChaosEngine(base_probability=0.2) 
+        self.chaos_engine = ChaosEngine(memory_manager=self.memory, base_probability=0.2) 
 
     def _clean_json(self, text: str) -> str:
         """
@@ -47,7 +47,10 @@ class DirectorAgent:
         focus = self.memory.get_narrative_focus()
 
         # Chaos Check
-        chaos_card = self.chaos_engine.roll_for_chaos(current_tension=0.5) # TODO: Use real tension metric
+        # TODO: 从 Reviewer 或 Memory 获取真实的 tension，目前暂时模拟为 0.5 或随机
+        # 为了演示效果，我们假设 tension 随 chapter 波动
+        simulated_tension = (current_chapter % 10) / 10.0 
+        chaos_card = self.chaos_engine.roll_for_chaos(current_chapter, current_tension=simulated_tension)
         
         chaos_prompt_injection = ""
         if chaos_card:

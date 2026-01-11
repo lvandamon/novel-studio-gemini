@@ -218,7 +218,7 @@ class NovelStudioShell(cmd.Cmd):
         
         # 4. 审核 (Reviewer)
         print_c("\nStep 4: 书评人审核 (Reviewer Agent)", Colors.CYAN)
-        review_result = self.reviewer.review_draft(content)
+        review_result = self.reviewer.review_draft(content, chapter_num=chap_num)
         
         if "PASS" in review_result:
             print_c("✅ 审核通过！", Colors.GREEN)

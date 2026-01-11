@@ -182,9 +182,153 @@ class MemoryManager:
                 notes TEXT
             )
         ''')
+
+        # 黄金锚点表 (Immutable Anchors) - 锁定人设核心
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS character_anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT,
+                category TEXT, -- 'Motivation' (源动力), 'Trauma' (创伤), 'Vow' (誓言), 'Tone' (语调)
+                content TEXT,
+                tags TEXT, -- JSON list of triggers e.g. ["fight", "despair"]
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 混沌冷却池 (Chaos Cooldowns)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chaos_cooldowns (
+                category TEXT PRIMARY KEY,
+                cooldown_until INTEGER -- 直到第几章才解冻
+            )
+        ''')
+
+        # 遥测指标表 (Narrative Telemetry) - 防崩坏监控
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chapter_metrics (
+                chapter_num INTEGER PRIMARY KEY,
+                tension INTEGER, -- 0-100
+                tone_darkness INTEGER, -- 0-100 (越高越压抑)
+                pacing_score INTEGER, -- 0-100 (越高越快)
+                character_consistency_score INTEGER, -- 0-100 (100为完美一致)
+                plot_logic_score INTEGER, -- 0-100 (100为无漏洞)
+                critique TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
         conn.close()
+
+    # --- 遥测指标 (Narrative Telemetry) ---
+
+    def log_chapter_metrics(self, chapter_num: int, metrics: Dict[str, Any]):
+        """记录章节遥测数据"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO chapter_metrics (chapter_num, tension, tone_darkness, pacing_score, character_consistency_score, plot_logic_score, critique) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chapter_num) DO UPDATE SET 
+                tension=excluded.tension,
+                tone_darkness=excluded.tone_darkness,
+                pacing_score=excluded.pacing_score,
+                character_consistency_score=excluded.character_consistency_score,
+                plot_logic_score=excluded.plot_logic_score,
+                critique=excluded.critique
+        ''', (
+            chapter_num, 
+            metrics.get("tension", 50),
+            metrics.get("tone_darkness", 50),
+            metrics.get("pacing_score", 50),
+            metrics.get("character_consistency_score", 100),
+            metrics.get("plot_logic_score", 100),
+            metrics.get("critique", "")
+        ))
+        conn.commit()
+        conn.close()
+        print(f"📈 Metrics Logged for Ch{chapter_num}: Tension={metrics.get('tension')}")
+
+    def get_metrics_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """获取最近的遥测数据，用于绘制图表"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT chapter_num, tension, tone_darkness, pacing_score, character_consistency_score, plot_logic_score 
+            FROM chapter_metrics 
+            ORDER BY chapter_num ASC
+        ''') # 获取全部数据交给前端绘图通常更好，limit 可以在前端做，或者这里做
+        # 如果数据量太大，再加 LIMIT。目前全部返回以便画完整曲线。
+        
+        columns = ["chapter", "tension", "darkness", "pacing", "char_consistency", "plot_logic"]
+        data = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        conn.close()
+        return data
+
+    # --- 混沌冷却管理 (Chaos Cooldowns) ---
+
+    def get_active_cooldowns(self, current_chapter: int) -> List[str]:
+        """获取当前仍处于冷却中的混沌类别"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT category FROM chaos_cooldowns WHERE cooldown_until > ?', (current_chapter,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    def set_chaos_cooldown(self, category: str, current_chapter: int, duration: int):
+        """设定某类混沌事件的冷却期"""
+        cooldown_until = current_chapter + duration
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO chaos_cooldowns (category, cooldown_until) VALUES (?, ?)
+            ON CONFLICT(category) DO UPDATE SET cooldown_until = ?
+        ''', (category, cooldown_until, cooldown_until))
+        conn.commit()
+        conn.close()
+        print(f"🧊 Chaos Category '{category}' frozen until Ch{cooldown_until}")
+
+    # --- 黄金锚点 (Immutable Anchors) ---
+
+    def add_anchor(self, character_name: str, category: str, content: str, tags: List[str] = None):
+        """
+        添加一个“黄金锚点”。这是角色绝对不能违背的设定/原文。
+        用于防止长篇连载中的人设漂移。
+        """
+        if tags is None: tags = []
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO character_anchors (character_name, category, content, tags) 
+            VALUES (?, ?, ?, ?)
+        ''', (character_name, category, content, json.dumps(tags)))
+        conn.commit()
+        conn.close()
+        print(f"⚓️ Anchor Set for {character_name}: [{category}]")
+
+    def get_character_anchors(self, character_name: str) -> str:
+        """获取角色的绝对锚点，格式化为 System Instruction"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT category, content, tags 
+            FROM character_anchors 
+            WHERE character_name = ? AND is_active = 1
+        ''', (character_name,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows: return ""
+
+        lines = [f"### ⚓️ {character_name} 的黄金锚点 (Immutable Anchors) - 必须严格遵守"]
+        for cat, content, tags_json in rows:
+            tags = json.loads(tags_json)
+            tag_str = f" [触发: {', '.join(tags)}]" if tags else ""
+            lines.append(f"- 【{cat}】{tag_str}: {content}")
+        
+        return "\n".join(lines)
 
     # --- 文风样板 (Style Guide) ---
 
@@ -506,6 +650,11 @@ class MemoryManager:
                 # 别名展示
                 aliases = data.get("aliases", [])
                 if aliases: info += f"曾用名/别名: {', '.join(aliases)}\n"
+
+                # 注入黄金锚点 (Highest Priority)
+                anchors = self.get_character_anchors(name)
+                if anchors:
+                    info = anchors + "\n\n" + info
 
                 history = self.get_relevant_events(name, query=query, recent_k=3, semantic_k=3)
                 if history != "无相关历史事件。":

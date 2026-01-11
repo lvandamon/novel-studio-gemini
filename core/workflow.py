@@ -144,7 +144,7 @@ class NovelWorkflow:
         outline_data = state.get("outline_data", {})
         active_chars = outline_data.get("active_characters", [])
         
-        feedback = self.reviewer.review_draft(state["draft_content"], active_characters=active_chars)
+        feedback = self.reviewer.review_draft(state["draft_content"], chapter_num=state["chapter_num"], active_characters=active_chars)
         state["review_feedback"] = feedback
         
         state["revision_count"] = state.get("revision_count", 0) + 1
