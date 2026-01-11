@@ -197,16 +197,30 @@ class MemoryManager:
         conn.close()
         print(f"🖋️ Style Sample Added: [{category}]")
 
-    def get_style_examples(self, limit: int = 3) -> str:
+    def get_style_examples(self, tags: List[str] = None, limit: int = 3) -> str:
         """
-        随机获取几个黄金样板，作为写作参考。
-        (未来可以优化为根据当前场景类型 category 检索)
+        获取文风样板 (Style Guide).
+        Context-Aware: 根据传入的 tags (如 ['Dark', 'Action']) 检索对应类别的样板。
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        # 随机取样，保证每次写作都有点新鲜感，但都在风格框架内
-        cursor.execute('SELECT category, content FROM style_guide ORDER BY RANDOM() LIMIT ?', (limit,))
-        rows = cursor.fetchall()
+        
+        rows = []
+        if tags:
+            # 尝试匹配 tags 对应的 category
+            # 动态构建 SQL
+            placeholders = ','.join(['?'] * len(tags))
+            # 优先匹配
+            sql = f"SELECT category, content FROM style_guide WHERE category IN ({placeholders}) ORDER BY RANDOM() LIMIT ?"
+            params = list(tags) + [limit]
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+        # 如果没有找到，或者没提供 tags，尝试获取 'General' 或 'Narrative' 作为默认
+        if not rows:
+            cursor.execute("SELECT category, content FROM style_guide WHERE category IN ('General', 'Narrative', 'Default') ORDER BY RANDOM() LIMIT ?", (limit,))
+            rows = cursor.fetchall()
+            
         conn.close()
         
         if not rows: return ""
@@ -778,6 +792,31 @@ class MemoryManager:
         # 如果 limit 限制，通常是取最近的？不，对于 Context 来说，可能需要全部 Volume 摘要
         # 这里返回全部，由调用者裁剪
         return [{"start": r[0], "end": r[1], "content": r[2]} for r in rows]
+
+    def get_recent_aggregated_summaries(self, level: str = "batch_10", limit: int = 3) -> str:
+        """获取最近的聚合摘要，用于构建中期记忆"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT start_chapter, end_chapter, content 
+            FROM summary_aggregations 
+            WHERE level = ? 
+            ORDER BY end_chapter DESC 
+            LIMIT ?
+        ''', (level, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows: return ""
+        
+        # 按时间正序排列
+        rows.reverse()
+        
+        lines = []
+        for r in rows:
+            lines.append(f"• [Ch{r[0]}-{r[1]} 综述]: {r[2]}")
+            
+        return "\n".join(lines)
 
     # --- 规划管理 (分级大纲) ---
 

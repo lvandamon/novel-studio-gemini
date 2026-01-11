@@ -66,6 +66,9 @@ class ContextManager:
         focus = self.memory.get_narrative_focus()
         active_plan = self.memory.get_active_plan()
         
+        # 0. 获取世界圣经 (相关核心设定)
+        bible_text = self.memory.get_bible_context(query=focus['goal'])
+
         # 1. 进度概览
         progress_text = f"当前进度: 第 {chapter_num} 章\n"
         if active_plan["volume"]:
@@ -93,6 +96,8 @@ class ContextManager:
         hooks_text = "\n".join([f"- [ID:{h['id']}] (Ch{h['chapter']}) {h['content']}" for h in hooks]) if hooks else "无活跃伏笔"
 
         return f"""
+{bible_text}
+
 # 🎬 导演控制台
 
 ## 1. 宏观进度
@@ -121,14 +126,38 @@ class ContextManager:
         # 扣除 Bible 的预算 (它不参与动态裁剪，必须保留)
         current_budget = self.total_budget - bible_tokens
         
-        # --- 1. Global Layer (世界与目标) ---
+        # --- 1. Global & Story Layer (世界与剧情脉络) ---
         focus = self.memory.get_narrative_focus()
+        active_plan = self.memory.get_active_plan()
+        
+        # 获取中期记忆 (最近的批量摘要)
+        story_so_far = self.memory.get_recent_aggregated_summaries(limit=2)
+        # 获取上一章摘要
+        prev_summary = self.memory.get_chapter_summary(chapter_num - 1)
+
+        # 构建规划信息
+        plan_info = ""
+        if active_plan["volume"]:
+            plan_info += f"【当前卷】: {active_plan['volume']['name']} (目标: {active_plan['volume']['goal']})\n"
+        if active_plan["arc"]:
+            plan_info += f"【当前单元】: {active_plan['arc']['name']} (目标: {active_plan['arc']['goal']})\n"
+
         global_text = f"""
 # 🌍 全局层 (Global Context)
 【当前目标】: {focus['goal']} 
 【当前冲突】: {focus['conflict']} 
 【世界基调】: {atmosphere.get('tone', '默认') if atmosphere else '默认'}
 【时间】: {focus.get('date', '未知')}
+
+# 📜 剧情脉络 (Story Context)
+## 1. 顶层规划
+{plan_info}
+
+## 2. 前情提要 (Medium-term Memory)
+{story_so_far if story_so_far else "（暂无阶段性综述）"}
+
+## 3. 上章回顾 (Immediate Context)
+{prev_summary}
 """
         
         # --- 2. Local Layer (场景与在场者) ---
@@ -136,16 +165,10 @@ class ContextManager:
         local_roster = self.memory.get_local_roster(scene_location)
         local_roster_trimmed = self._trim_lines_to_budget(local_roster, self.base_budgets["local_roster"])
         
-        # 上一章摘要 (紧密衔接)
-        prev_summary = self.memory.get_chapter_summary(chapter_num - 1)
-        
         local_text = f"""
 # 📍 局部层 (Local Context)
 【场景地点】: {scene_location}
 【感官焦点】: {atmosphere.get('sensory_focus', '无') if atmosphere else '无'}
-
-【上一章回顾】:
-{prev_summary}
 
 【场景内角色 (Roster)】:
 {local_roster_trimmed}
@@ -194,9 +217,24 @@ class ContextManager:
 ## 社交关系网 (Graph)
 {graph_trimmed}
 """
+        
+        # 文风样板 retrieval (Context-Aware)
+        style_tags = []
+        if atmosphere:
+            # 简单的映射逻辑，或是直接使用 tone
+            tone = atmosphere.get('tone', '')
+            if tone: style_tags.append(tone)
+            # 可以扩展更多映射，例如 'Tense' -> 'Action'
+            if 'Tense' in tone or 'Dark' in tone:
+                style_tags.append('Action')
+                style_tags.append('Suspense')
+            elif 'Warm' in tone:
+                style_tags.append('Dialogue')
+        
+        style_text = self.memory.get_style_examples(tags=style_tags)
 
         # --- Final Assembly ---
         # Bible 放在最前面!
-        # Bible -> Global -> Local -> Style -> Retrieval
+        # Bible -> Global -> Local -> Retrieval
         full_context = f"{bible_text}\n{global_text}\n{local_text}\n{style_text}\n{retrieval_text}"
         return full_context

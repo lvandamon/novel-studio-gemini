@@ -16,37 +16,40 @@ class ReviewerAgent:
     def _clean_think(self, text: str) -> str:
         return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
-    def review_draft(self, content: str) -> str:
+    def review_draft(self, content: str, active_characters: List[str] = None) -> str:
         """
         审核章节内容，检查逻辑冲突。
         返回: "PASS" 或 修改建议文本。
         """
         print(f"🧐 Reviewer: 正在进行逻辑审计 (DeepSeek-R1)...")
         
-        # Extract probable characters from content (simple heuristic or Regex)
-        # 既然没有传入 active_characters，我们只能简单从文本中提取或者全量检查
-        # 更好的做法是 workflow 传入，但为了保持接口兼容，我们这里暂时不做深度提取
-        # 依赖 R1 的内部逻辑能力，但为了加强效果，我们可以从 content 里 regex 提取大写名字
-        # 或者为了简单，直接传给 LLM 文本，让 LLM 自己判断。
-        # 但 Prompts 里需要 {memory_context}，这需要 memory.get_hard_logic_snapshot
+        # 1. 确定活跃角色
+        if not active_characters:
+            all_chars = [c['name'] for c in self.memory.get_all_characters_list()]
+            active_characters = [name for name in all_chars if name in content]
         
-        # 修正策略：尝试从文本中提取名字 (Keyword Extraction)
-        # 或者我们修改 workflow 传入 active_characters (更稳妥，但要动 workflow)
-        # 鉴于现在是 "Fix Missing Method"，我们先实现 review_draft，并尽量获取上下文
+        # 2. 获取上下文资料
+        # A. 世界圣经 (最高优先级)
+        bible_context = self.memory.get_bible_context(query=content[:500], active_entities=active_characters)
         
-        # 临时方案：从 Memory 获取所有活跃角色的名字进行简单的包含匹配
-        all_chars = [c['name'] for c in self.memory.get_all_characters_list()]
-        active_in_text = [name for name in all_chars if name in content]
+        # B. 硬逻辑快照 (状态、位置、物品)
+        hard_logic_snapshot = self.memory.get_hard_logic_snapshot(active_characters)
         
-        # 1. 获取硬逻辑快照
-        hard_logic_snapshot = self.memory.get_hard_logic_snapshot(active_in_text)
-        
-        # 2. 获取相关历史记忆
+        # C. 相关历史记忆 (RAG)
         memory_context = self.memory.query_related_context(content[:500], k=5)
 
         try:
+            full_context = f"""
+{bible_context}
+
+【硬逻辑快照】
+{hard_logic_snapshot}
+
+【历史记忆】
+{memory_context}
+"""
             response = self.chain.invoke({
-                "memory_context": f"【硬逻辑快照】\n{hard_logic_snapshot}\n\n【历史记忆】\n{memory_context}",
+                "memory_context": full_context,
                 "content": content
             })
             
