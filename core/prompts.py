@@ -4,6 +4,34 @@ from langchain_core.prompts import ChatPromptTemplate
 # SPECIALIZED AGENT PROMPTS (The Team)
 # ==============================================================================
 
+# --- Memory Agent (DeepSeek-V3) Prompts ---
+
+ENTITY_EXTRACTION_SYSTEM_PROMPT = """你是一个专业的【实体识别引擎】。
+你的任务是从给定的文本（查询语句或文本片段）中，提取出所有关键的实体名称。
+
+提取目标：
+1. **角色名** (Characters): 主角、配角、反派的名字或外号 (e.g. "萧风", "韩老魔").
+2. **地点名** (Locations): 具体的场景或地名 (e.g. "青云门", "天南大陆").
+3. **物品名** (Items): 重要的法宝、丹药、道具 (e.g. "掌天瓶", "筑基丹").
+4. **势力/组织** (Factions): 宗门、家族、组织名 (e.g. "魂殿", "纳兰家族").
+5. **专有概念** (Concepts): 特殊的功法、境界、法则 (e.g. "元婴期", "焚决").
+
+输出要求：
+- 仅输出一个 JSON 列表 (List[str])。
+- 严禁包含 Markdown 标记、解释或无关字符。
+- 尽可能使用实体的全称（如果文本中明确），去除形容词修饰（如将"破损的小剑"提取为"小剑"，除非全名就是"破损小剑"）。
+
+Example Input: "萧风拿起断剑，冲向了青云大殿，心中默念焚决。"
+Example Output: ["萧风", "断剑", "青云大殿", "焚决"]
+"""
+
+ENTITY_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", ENTITY_EXTRACTION_SYSTEM_PROMPT),
+        ("user", "{text}"),
+    ]
+)
+
 # --- Editor Agent (DeepSeek-R1) Prompts ---
 
 EDITOR_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的网文主编，精通罗伯特·麦基的《故事》理论与网文黄金三章法则。
@@ -365,7 +393,13 @@ ARCHIVIST_VALIDATION_SYSTEM_PROMPT = """你是一个严苛的【逻辑法官】�
 2. **时空唯一性**：如果历史记录显示某人在 A 地，且没有移动事件，新数据不能突然出现在 B 地。
 3. **关系一致性**：仇敌变朋友需要过程。如果没有交互事件，关系突变是**矛盾**。
 4. **物品守恒**：使用未拥有的物品是**矛盾**。
-5. **允许自然演变**：受伤 -> 痊愈，活着 -> 死亡，拥有 -> 丢失，这些是自然变化，**不是矛盾**。
+
+### 吃书（Retcon）处理机制：
+如果发现矛盾，但新数据看起来像是作者**故意修改设定**（吃书/Retcon），例如：
+- 显式揭露以前的信息是“谎言”或“伪史”。
+- 剧情需要强制改变某人的出身、能力或状态，且这种改变是推动剧情所必须的。
+
+在这种情况下，不要 BLOCK，而是选择 **RETCON** 状态，并下达修改历史记录的指令。
 
 输入：
 - 【拟定更新】：Archivist 从最新章节提取的数据。
@@ -374,18 +408,20 @@ ARCHIVIST_VALIDATION_SYSTEM_PROMPT = """你是一个严苛的【逻辑法官】�
 请输出 JSON：
 ```json
 {{
-    "status": "PASS" | "BLOCK",
-    "contradictions": [
+    "status": "PASS" | "BLOCK" | "RETCON",
+    "contradictions": [ ... ], // 仅当 BLOCK 时使用
+    "retcon_instructions": [ // 仅当 RETCON 时使用
         {{
-            "entity": "实体名",
-            "issue": "详细说明矛盾点 (e.g. 历史记录显示已死于第5章，现试图更新为存活)",
-            "severity": "CRITICAL" | "MINOR"
+            "target_entity": "实体名",
+            "operation": "UPDATE" | "MARK_FALSE" | "DELETE",
+            "field": "字段名 (e.g. status, location, origin)",
+            "new_value": "新值 (仅 UPDATE 使用)",
+            "reason": "修改原因 (e.g. 作者吃书: 主角其实是魔族)"
         }}
     ],
-    "sanitized_updates_suggestion": "如果只是部分数据有毒，请给出剔除有毒字段后的简要建议，或者建议完全回滚。"
+    "sanitized_updates_suggestion": "如果只是部分数据有毒，请给出剔除有毒字段后的简要建议。"
 }}
 ```
-如果状态是 PASS，contradictions 数组应为空。
 """
 
 ARCHIVIST_VALIDATION_PROMPT = ChatPromptTemplate.from_messages(

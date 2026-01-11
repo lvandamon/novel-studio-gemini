@@ -24,14 +24,15 @@ class ContextManager:
         except:
             self.encoder = tiktoken.get_encoding("cl100k_base")
             
-        # 默认总预算 (conservative for output room)
-        self.total_budget = 12000 
+        # 默认总预算 (32k for deepseek-v3/r1 long context)
+        self.total_budget = 32000 
         
         # 基础层预算 (硬性保留)
         self.base_budgets = {
-            "global": 2000,
-            "local_roster": 1500,
-            "prev_summary": 800,
+            "global": 4000,
+            "local_roster": 3000,
+            "prev_summary": 2000,
+            "vocabulary": 1000,
         }
 
     def _count_tokens(self, text: str) -> int:
@@ -57,6 +58,29 @@ class ContextManager:
             result.reverse()
             
         return "\n".join(result)
+
+    def _build_vocabulary_constraints(self, volume_name: str, arc_name: str) -> str:
+        """
+        构建动态词表约束 (Dynamic Vocabulary Constraints)。
+        从世界圣经中检索当前阶段的禁词、推荐词。
+        """
+        # 检索 Terminology 相关的圣经条目
+        vocab_context = self.memory.get_bible_context(query=f"{volume_name} {arc_name} 术语 词汇 禁忌语")
+        
+        # 基础通用约束 (Hardcoded Baseline)
+        baseline = """
+### 🚫 词汇禁区 (Vocabulary Taboos)
+- 严禁出现现代科技词汇 (如: 信号, 逻辑, 降维打击, 量子, 甚至“思考方式”等现代口语)。
+- 严禁出现 OOC 网络热词。
+- 严禁出现非本世界观的计量单位 (除非圣经另有规定)。
+
+### ✅ 推荐词汇 (Recommended Lexicon)
+- 使用古雅、稳重的半文言或正统网文仙侠笔触。
+- 动作描写优先使用具体的武学方位和劲力描述。
+"""
+        if vocab_context:
+            return f"{baseline}\n### 🌍 当前阶段特定词表:\n{vocab_context}"
+        return baseline
 
     def build_director_context(self, chapter_num: int) -> str:
         """
@@ -162,6 +186,12 @@ class ContextManager:
         active_plan = self.memory.get_active_plan()
         prev_summary = self.memory.get_chapter_summary(chapter_num - 1)
         
+        # 动态词表
+        vocab_text = self._build_vocabulary_constraints(
+            active_plan.get('volume', {}).get('name', '默认'),
+            active_plan.get('arc', {}).get('name', '默认')
+        )
+
         # 强制获取活跃伏笔 (不再靠 RAG 碰运气)
         active_hooks = ""
         if intent["needs_hooks"] or intent["type"] == "revelation":
@@ -238,4 +268,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_trimmed}"
+        return f"{bible_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_trimmed}"

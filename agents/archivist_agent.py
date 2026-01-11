@@ -152,6 +152,33 @@ class ArchivistAgent:
             
             elif status == "PASS":
                 print("   ✅ 逻辑验证通过。")
+                
+            elif status == "RETCON":
+                print("   🔄 触发历史修正 (RETCON) 机制...")
+                instructions = validation_result.get("retcon_instructions", [])
+                for instr in instructions:
+                    target = instr.get("target_entity")
+                    op = instr.get("operation")
+                    reason = instr.get("reason")
+                    
+                    print(f"      🛠️ [RETCON] {op} {target}: {reason}")
+                    
+                    if op == "UPDATE":
+                        field = instr.get("field")
+                        new_val = instr.get("new_value")
+                        # 尝试修补角色档案
+                        # 注意：这里简化处理，直接以此名义更新 Character 表
+                        # 实际上可能需要更复杂的逻辑来处理非 Character 实体
+                        if field and new_val:
+                            self.memory.upsert_character(target, {field: new_val}, chapter_num=chapter_num)
+                            print(f"      -> 已强制更新 {target}.{field} = {new_val}")
+                            
+                    elif op == "MARK_FALSE":
+                        # 未来实现：在 VectorDB 或 Graph 中标记某条记录为“伪史”
+                        print(f"      -> (TODO) 标记关于 {target} 的相关记忆为伪史。")
+                        
+                print("   ✅ 历史修正完成，放行本次更新。")
+
             else:
                 print(f"   ⚠️ 验证返回了未知状态: {status}，默认放行。")
 

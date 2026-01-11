@@ -7,7 +7,10 @@ from typing import List, Dict, Any, Optional
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
 from core.graph_store import GraphManager
+from core.llm import get_deepseek_chat
+from core.prompts import ENTITY_EXTRACTION_PROMPT
 
 class MemoryManager:
     def __init__(self, db_path: str = "data/novel.db", vector_db_path: str = "data/vector_store"):
@@ -37,6 +40,9 @@ class MemoryManager:
         
         # 3. 初始化 Knowledge Graph (Neo4j)
         self.graph = GraphManager()
+        
+        # 4. 初始化实体提取链 (LLM)
+        self.extractor_chain = ENTITY_EXTRACTION_PROMPT | get_deepseek_chat() | StrOutputParser()
 
     def _init_sqlite(self):
         """初始化 SQLite 表结构 - v2.0 UUID 重构版"""
@@ -1155,26 +1161,35 @@ class MemoryManager:
         metadata.update({"chapter": chapter_num, "type": "chapter_content"})
         self.vector_store.add_documents([Document(page_content=text, metadata=metadata)])
 
-    def _extract_keywords(self, text: str) -> List[str]:
-        """简单的关键词提取，目前基于已有角色和物品名，以及常见网文实体词"""
-        # 1. 获取所有已知实体名
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT alias FROM character_aliases")
-        aliases = [r[0] for r in cursor.fetchall()]
-        cursor.execute("SELECT name FROM items")
-        items = [r[0] for r in cursor.fetchall()]
-        conn.close()
-        
-        known_entities = set(aliases + items)
-        
-        # 2. 简单的正则匹配
-        import re
-        found = []
-        for entity in known_entities:
-            if entity in text:
-                found.append(entity)
-        return list(set(found))
+    def _extract_entities_semantically(self, text: str) -> List[str]:
+        """
+        使用 LLM 从文本中提取关键实体 (Semantic Entity Extraction).
+        替代旧的正则匹配逻辑，以解决歧义和召回率问题。
+        """
+        try:
+            # 1. Call LLM
+            # print(f"🔍 Extracting entities from: {text[:50]}...")
+            json_str = self.extractor_chain.invoke({"text": text})
+            
+            # 2. Clean & Parse JSON
+            # Basic cleaning for potential markdown fences
+            json_str = json_str.replace("```json", "").replace("```", "").strip()
+            
+            # Attempt to find list bracket if extra text exists
+            if "[" in json_str and "]" in json_str:
+                start = json_str.find("[")
+                end = json_str.rfind("]") + 1
+                json_str = json_str[start:end]
+
+            entities = json.loads(json_str)
+            
+            if isinstance(entities, list):
+                # print(f"   -> Found: {entities}")
+                return [str(e) for e in entities]
+            return []
+        except Exception as e:
+            print(f"⚠️ Entity Extraction Failed: {e}")
+            return []
 
     def query_related_context(self, query: str, k: int = 5) -> str:
         """
@@ -1194,12 +1209,14 @@ class MemoryManager:
             final_docs[key] = doc
 
         # --- Stage 2: 实体与伏笔关联检索 ---
-        keywords = self._extract_keywords(query)
+        # 使用语义实体提取，而非正则匹配
+        keywords = self._extract_entities_semantically(query)
         if keywords:
             # 2a. 检查是否有相关联的未回收伏笔
             active_hooks = self.get_active_foreshadowing()
             for hook in active_hooks:
                 # 如果伏笔内容包含当前 query 中的关键词
+                # 这里的匹配逻辑也可以升级，但目前保留简单的包含匹配，因为 keywords 已经是精准实体了
                 for kw in keywords:
                     if kw in hook['content']:
                         # 构造一个虚拟 Document

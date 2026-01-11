@@ -27,32 +27,28 @@ class SimulatorAgent:
         """
         print(f"🧠 Simulator: 正在代入角色 {active_characters} 进行行为验证...")
 
-        # 1. 准备角色快照 (Snapshot)
-        # 获取包含心理状态的详细信息
-        snapshots = []
-        for name in active_characters:
-            char_data = self.memory.get_character(name)
-            if char_data:
-                # 构建精简的 Prompt-Ready 快照
-                snapshot = {
-                    "name": name,
-                    "state": char_data.get("current_state", "正常"),
-                    "psychological_state": char_data.get("psychological_state", "平稳"),
-                    "personality": char_data.get("personality", []),
-                    "values": char_data.get("values", []), # 假设 schema 里以后会有
-                    "recent_trauma": char_data.get("psychological_history", [])[-3:] if char_data.get("psychological_history") else "无"
-                }
-                snapshots.append(json.dumps(snapshot, ensure_ascii=False))
-            else:
-                snapshots.append(f"{{'name': '{name}', 'note': '档案缺失'}}")
+        # 1. 准备角色资料
+        # A. 基础档案 (Static Profile + Status)
+        basic_info = self.memory.get_character_details(active_characters, query="Simulator Check")
         
-        snapshot_text = "\n".join(snapshots)
+        # B. 精神轨迹 (Emotional Inertia)
+        mental_curves = self.memory.get_character_mental_curve(active_characters, limit=5)
+        
+        # 组合 Profile
+        profile_text = f"""
+=== 基础档案 ===
+{basic_info}
+
+=== 📉 精神/情绪轨迹 (Mental Inertia) ===
+{mental_curves}
+"""
+        
         outline_text = json.dumps(outline.get("outline", []), ensure_ascii=False)
 
         # 2. 调用 LLM
         try:
             response = self.chain.invoke({
-                "character_profiles": snapshot_text,
+                "character_profiles": profile_text,
                 "outline": outline_text
             })
 
