@@ -5,7 +5,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 
 from core.llm import get_deepseek_chat
-from core.prompts import ARCHIVIST_EXTRACT_PROMPT, ARCHIVIST_SYSTEM_PROMPT
+from core.prompts import ARCHIVIST_EXTRACT_PROMPT, ARCHIVIST_SYSTEM_PROMPT, ARCHIVIST_VALIDATION_PROMPT
 from core.memory import MemoryManager
 from core.schemas import ChapterExtractionSchema, RealityLayer
 
@@ -84,6 +84,81 @@ class ArchivistAgent:
         
         raise ValueError(f"Archivist 严重错误：经过 {max_retries} 次重试后仍无法提取有效数据。\n最后错误: {last_error}")
 
+    def _validate_updates(self, extraction: ChapterExtractionSchema, chapter_num: int):
+        """
+        逻辑守门员：验证提取的数据是否与既定事实（历史记录）存在严重冲突。
+        防止 AI 幻觉污染数据库（The Poisoned Well Problem）。
+        """
+        # 1. 识别涉及的实体 (Entities involved)
+        entities_to_check = set()
+        for char in extraction.characters:
+            name = char.get("name")
+            if name: entities_to_check.add(name)
+        
+        for rel in extraction.relationships:
+            entities_to_check.add(rel.source)
+            entities_to_check.add(rel.target)
+            
+        if not entities_to_check:
+            return # 无需验证
+
+        # 2. 批量获取既定事实 (Batch fetch established context)
+        context_snippets = []
+        # 我们只验证在 Graph 中已存在的实体，新实体由 Reviewer 负责合理性检查
+        # 这里只做“防冲突”检查
+        for entity in entities_to_check:
+            ctx = self.memory.graph.query_entity_context(entity, current_chapter=chapter_num)
+            # 过滤掉无效返回
+            if ctx and "暂无" not in ctx and "未连接" not in ctx and "未发现" not in ctx:
+                context_snippets.append(f"--- 实体: {entity} 的历史记录 ---\n{ctx}")
+
+        if not context_snippets:
+            # print("   ℹ️ 暂无相关历史记录，跳过逻辑冲突验证。")
+            return 
+
+        existing_context_str = "\n".join(context_snippets)
+
+        # 3. 召唤逻辑法官 (Call LLM Validator)
+        updates_json = extraction.model_dump_json()
+        
+        # 使用专门的验证 Chain
+        validation_chain = ARCHIVIST_VALIDATION_PROMPT | self.llm | StrOutputParser()
+        
+        try:
+            print("   ⚖️ 正在进行逻辑冲突验证...")
+            raw_res = validation_chain.invoke({
+                "existing_context": existing_context_str, 
+                "proposed_updates": updates_json
+            })
+            clean_res = self._clean_json(raw_res)
+            validation_result = json.loads(clean_res)
+            
+            status = validation_result.get("status")
+            if status == "BLOCK":
+                issues = validation_result.get("contradictions", [])
+                error_lines = []
+                for issue in issues:
+                    entity = issue.get("entity", "Unknown")
+                    desc = issue.get("issue", "No description")
+                    severity = issue.get("severity", "UNKNOWN")
+                    error_lines.append(f"   🛑 [{severity}] {entity}: {desc}")
+                
+                error_msg = "\n".join(error_lines)
+                print(f"   ❌ 逻辑验证未通过！发现 {len(issues)} 个冲突。")
+                print(error_msg)
+                
+                # 抛出异常，阻止数据库污染
+                raise ValueError(f"逻辑一致性校验失败 (Consistency Violation):\n{error_msg}")
+            
+            elif status == "PASS":
+                print("   ✅ 逻辑验证通过。")
+            else:
+                print(f"   ⚠️ 验证返回了未知状态: {status}，默认放行。")
+
+        except (json.JSONDecodeError, ValidationError) as e:
+            print(f"   ⚠️ 验证结果解析失败: {e}。为了不阻塞流程，本次暂且放行，但请留意。")
+        # 注意：ValueError (Conflict) 会被上层捕获并中断流程
+
     def archive_chapter(self, content: str, chapter_num: int):
         print(f"🗄️ Archivist: 正在深度解析第 {chapter_num} 章...")
         
@@ -96,6 +171,10 @@ class ArchivistAgent:
 
             # 2. 提取信息
             extraction = self._extract_with_retry(content, current_date)
+
+            # 🚨 逻辑验证 (Consistency Check)
+            # 在写入数据库前，先检查是否有致命逻辑冲突
+            self._validate_updates(extraction, chapter_num)
             
             # 3. 更新摘要
             self.memory.update_chapter_summary(chapter_num, extraction.summary)

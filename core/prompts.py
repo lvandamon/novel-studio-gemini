@@ -332,6 +332,55 @@ ARCHIVIST_EXTRACT_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+ARCHIVIST_VALIDATION_SYSTEM_PROMPT = """你是一个严苛的【逻辑法官】。
+你的任务是审查“拟定归档的数据更新”是否与“既定事实（历史记录）”存在逻辑矛盾。
+
+原则：
+1. **死者不可复生**：如果历史记录显示某人已死，且新数据没有包含明确的“复活仪式”事件，则状态变为“活跃/存活”是**严重矛盾**。
+2. **时空唯一性**：如果历史记录显示某人在 A 地，且没有移动事件，新数据不能突然出现在 B 地。
+3. **关系一致性**：仇敌变朋友需要过程。如果没有交互事件，关系突变是**矛盾**。
+4. **物品守恒**：使用未拥有的物品是**矛盾**。
+5. **允许自然演变**：受伤 -> 痊愈，活着 -> 死亡，拥有 -> 丢失，这些是自然变化，**不是矛盾**。
+
+输入：
+- 【拟定更新】：Archivist 从最新章节提取的数据。
+- 【既定事实】：从数据库查出的相关实体历史状态。
+
+请输出 JSON：
+```json
+{{
+    "status": "PASS" | "BLOCK",
+    "contradictions": [
+        {{
+            "entity": "实体名",
+            "issue": "详细说明矛盾点 (e.g. 历史记录显示已死于第5章，现试图更新为存活)",
+            "severity": "CRITICAL" | "MINOR"
+        }}
+    ],
+    "sanitized_updates_suggestion": "如果只是部分数据有毒，请给出剔除有毒字段后的简要建议，或者建议完全回滚。"
+}}
+```
+如果状态是 PASS，contradictions 数组应为空。
+"""
+
+ARCHIVIST_VALIDATION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", ARCHIVIST_VALIDATION_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+    【既定事实 (Established Facts)】：
+    {existing_context}
+
+    【拟定更新 (Proposed Updates)】：
+    {proposed_updates}
+
+    请进行逻辑判决。
+    """,
+        ),
+    ]
+)
+
 # --- Summarizer Agent (DeepSeek-V3) Prompts ---
 
 SUMMARIZER_SYSTEM_PROMPT = """你是专业的网文编辑，擅长进行剧情浓缩。
