@@ -1,15 +1,18 @@
 import json
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any
 from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_reasoner
 from core.prompts import EDITOR_GEN_OUTLINE_PROMPT
+from core.context_manager import ContextManager
+from core.schemas import AtmosphereSchema
 
 class EditorAgent:
-    def __init__(self):
-        # 使用 R1 推理模型进行大纲构思
-        self.llm = get_deepseek_reasoner()
+    def __init__(self, context_manager: ContextManager):
+        # Editor use Reasoner (R1) for logical plot planning
+        self.llm = get_deepseek_reasoner() 
         self.chain = EDITOR_GEN_OUTLINE_PROMPT | self.llm | StrOutputParser()
+        self.context_manager = context_manager
 
     def _clean_json(self, text: str) -> str:
         """

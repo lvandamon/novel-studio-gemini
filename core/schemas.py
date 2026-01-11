@@ -34,6 +34,13 @@ class VolumeSchema(BaseModel):
     goal: str
     status: ArcStatus = ArcStatus.PLANNED
 
+class MentalStateEntry(BaseModel):
+    chapter: int
+    state: str # e.g. "绝望", "狂喜"
+    intensity: int = Field(..., ge=0, le=100) # 情绪烈度 (0-100)
+    sanity: int = Field(100, ge=0, le=100) # 理智值/SAN值 (0-100)
+    reason: str
+
 class CharacterSchema(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -41,8 +48,8 @@ class CharacterSchema(BaseModel):
     role: str = "未知"
     level: str = "未知"
     personality: List[str] = Field(default_factory=list) # 静态性格标签
-    psychological_state: str = "平稳" # 动态心理状态，e.g. "焦虑", "杀意沸腾", "心如死灰"
-    psychological_history: List[Dict[str, Any]] = Field(default_factory=list) # e.g. [{"chapter": 10, "state": "绝望", "reason": "家族被灭"}]
+    psychological_state: str = "平稳" # 简要当前状态
+    mental_ledger: List[MentalStateEntry] = Field(default_factory=list) # 精神体检账本 (Mental State Ledger)
     relationships: Dict[str, str] = Field(default_factory=dict)
     inventory: List[str] = Field(default_factory=list)
     goals: List[str] = Field(default_factory=list)
@@ -65,6 +72,14 @@ class ForeshadowingSchema(BaseModel):
     type: str = "plot_hook"
     importance: int = 3 
     potential_resolution: Optional[str] = None
+
+class AtmosphereSchema(BaseModel):
+    tone: str # 基调 (e.g. 压抑, 欢快)
+    tension: float = Field(..., ge=0.0, le=1.0) # 紧张度 (0.0 - 1.0)
+    mystery: float = Field(..., ge=0.0, le=1.0) # 悬疑度
+    romance: float = Field(..., ge=0.0, le=1.0) # 情感/浪漫度
+    sensory_focus: str # 视觉/听觉/嗅觉
+    color_palette: str # 场景色调 (e.g. 灰白, 血红)
 
 class GraphTripletSchema(BaseModel):
     source: str

@@ -1,4 +1,5 @@
 import json
+import re
 from pydantic import ValidationError
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -15,7 +16,30 @@ class ArchivistAgent:
         self.memory = memory_manager
 
     def _clean_json(self, text: str) -> str:
-        return text.replace("```json", "").replace("```", "").strip()
+        """
+        Robust JSON cleaning:
+        1. Remove Markdown code blocks.
+        2. Try to find the first '{' and last '}' to isolate the JSON object.
+        3. Remove Common JSON errors like Trailing Commas (simple regex).
+        """
+        # 1. Strip Markdown
+        text = text.replace("```json", "").replace("```", "").strip()
+        
+        # 2. Extract JSON block if surrounded by other text
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1:
+            text = text[start : end + 1]
+            
+        # 3. Handle Python 'None' -> JSON 'null' (Common LLM slip)
+        text = text.replace(": None", ": null").replace(":None", ": null")
+        
+        # 4. Handle Trailing Commas in arrays/objects (Simple heuristic)
+        # Remove comma before close bracket/brace
+        text = re.sub(r',\s*}', '}', text)
+        text = re.sub(r',\s*]', ']', text)
+        
+        return text
 
     def _extract_with_retry(self, content: str, current_date: str, max_retries: int = 3) -> ChapterExtractionSchema:
         raw_response = ""
@@ -28,16 +52,26 @@ class ArchivistAgent:
         except (ValidationError, json.JSONDecodeError) as e:
             print(f"   ⚠️ Archivist: 第一次提取失败 ({type(e).__name__})。正在尝试自动修复...")
             last_error = str(e)
+            # print(f"DEBUG RAW: {raw_response}")
         
         for attempt in range(max_retries):
             try:
+                # Construct a more explicit repair prompt
                 repair_messages = [
                     SystemMessage(content=ARCHIVIST_SYSTEM_PROMPT),
                     HumanMessage(content=f"【当前世界日期】：{current_date}\n\n【正文内容】\n{content}"),
                     HumanMessage(content=f"""
-                    上一次生成的 JSON 解析失败或校验未通过。
+                    JSON 解析错误！
                     错误信息：{last_error}
-                    上次错误片段：{raw_response[:500]}...                    请重新分析正文，并严格按照 JSON 格式要求输出修复后的结果。
+                    
+                    请修复你的 JSON 输出。
+                    注意：
+                    1. 确保所有属性名都用双引号。
+                    2. 确保没有尾随逗号。
+                    3. 确保字符串内的引号已转义。
+                    4. 严禁使用 Markdown 代码块，只输出纯 JSON 字符串。
+                    
+                    请重新输出：
                     """)
                 ]
                 response_msg = self.llm.invoke(repair_messages)
@@ -67,9 +101,6 @@ class ArchivistAgent:
             self.memory.update_chapter_summary(chapter_num, extraction.summary)
 
             # 4. 记录事件 (带层级 Reality/Dream)
-            # 我们检查这一章的主要层级。如果大部分事件是 Dream，我们就不应该更新世界状态。
-            # 这里做一个简单的启发式判断：如果 extraction 里明确标记了非 Reality 的事件，我们记录下来。
-            
             non_reality_count = 0
             for event in extraction.events:
                 self.memory.log_event(
@@ -83,24 +114,41 @@ class ArchivistAgent:
                     non_reality_count += 1
                 print(f"   🎭 事件记录 [{event.layer.value}]: {event.character} -> {event.type}")
 
-            # 🚨 现实锚点检查：如果本章全是幻境，跳过状态更新
+            # 🚨 现实锚点检查
             if len(extraction.events) > 0 and non_reality_count == len(extraction.events):
                 print("   ⚠️ 检测到本章完全处于【非真实】层级，跳过角色状态和图谱更新。" )
                 return 
 
-            # 5. 更新角色 (仅当层级允许)
+            # 5. 更新角色
             for char_data in extraction.characters:
                 name = char_data.get("name")
-                if name:
-                    updates = char_data.get("updates", {}) # 兼容旧 prompt 格式
-                    if not updates: 
-                        # 如果没有 updates 字段，假设 char_data 本身就是更新数据
-                        # 排除 name, id 等字段
-                        updates = {k:v for k,v in char_data.items() if k not in ['name', 'id']}
-                    
-                    if updates:
-                        self.memory.upsert_character(name, updates, chapter_num)
-                        print(f"   👤 角色更新: {name}")
+                if not name: continue
+                
+                updates = char_data.get("updates", {})
+                
+                # Merge top-level fields
+                updates["aliases"] = char_data.get("aliases", [])
+                updates["location"] = char_data.get("location")
+                updates["importance"] = char_data.get("importance")
+                updates["dialogue_style"] = char_data.get("dialogue_style")
+                updates["dialogue_examples"] = char_data.get("dialogue_examples")
+                
+                # --- 处理精神账本 (Mental Ledger) ---
+                mental = char_data.get("mental_update")
+                if mental:
+                    # 构造 MentalStateEntry
+                    entry = {
+                        "chapter": chapter_num,
+                        "state": mental.get("state", "未知"),
+                        "intensity": mental.get("intensity", 50),
+                        "sanity": mental.get("sanity", 100),
+                        "reason": mental.get("reason", "无")
+                    }
+                    updates["mental_ledger"] = [entry]
+                    updates["psychological_state"] = mental.get("state")
+
+                self.memory.upsert_character(name, updates, chapter_num)
+                print(f"   👤 角色更新: {name}")
 
             # 6. 处理伏笔
             for hook in extraction.new_foreshadowing:
@@ -111,9 +159,11 @@ class ArchivistAgent:
                 self.memory.resolve_foreshadowing(hook_id, chapter_num)
                 print(f"   ✅ 伏笔回收: ID {hook_id}")
 
-            # 7. 更新知识图谱 (支持删除)
+            # 7. 更新知识图谱
             if extraction.relationships:
                 for trip in extraction.relationships:
+                    # trip is a GraphTripletSchema object (Pydantic model) 
+                    
                     self.memory.graph.update_relationship(
                         source=trip.source,
                         source_type=trip.source_type,

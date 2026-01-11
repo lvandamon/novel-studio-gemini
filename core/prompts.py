@@ -31,6 +31,9 @@ EDITOR_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的网文主编
     "active_characters": ["萧风", "林月"],
     "atmosphere": {{
         "tone": "基调 (e.g. 压抑/轻快/热血)",
+        "tension": 0.8,  // 紧张度 (0.0 - 1.0)
+        "mystery": 0.3,  // 悬疑度 (0.0 - 1.0)
+        "romance": 0.0,  // 情感度 (0.0 - 1.0)
         "sensory_focus": "感官侧重 (e.g. 听觉-雨声/视觉-色彩)",
         "color_palette": "环境色调 (e.g. 灰白/血红)"
     }},
@@ -48,15 +51,68 @@ EDITOR_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的网文主编
 4. **地点明确**：明确当前发生的地点，以便上下文管理器加载正确的人物。
 """
 
-EDITOR_GEN_OUTLINE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", EDITOR_SYSTEM_PROMPT),
-    ("user", """
+EDITOR_GEN_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", EDITOR_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【上下文信息 (Context)】：
     {context}
 
     请推演下一章（第 {chapter_num} 章）的详细细纲。
-    """)
-])
+    """,
+        ),
+    ]
+)
+
+
+# --- Simulator Agent (DeepSeek-R1) Prompts ---
+
+SIMULATOR_SYSTEM_PROMPT = """你是一个绝对理性的【角色行为模拟器 (Character Simulator)】。
+你不是编剧，你不在乎剧情是否精彩。你唯一的职责是**保护人设**。
+
+你将接收到：
+1. **角色档案与精神轨迹 (Mental Ledger)**：展示角色最近几章的情绪走向和理智值 (SAN)。
+2. **拟定大纲**：编剧（Editor）编写的剧情大纲。
+
+你的任务是**代入**每一个在场角色，进行【心理沙盘推演】：
+- 这是一个 **Check-Pass** 机制。
+- 问自己：“基于此人的当前心理状态和核心价值观，他真的会做出大纲里的这些行为吗？”
+
+**核心法则：情绪惯性 (Emotional Inertia)**
+- 人的情绪是有重量的，不能瞬间急转弯。
+- 如果上一章是 **"绝望 (Intensity: 90)"**，这一章不可能直接变成 **"理智分析"**。中间必须有过渡或强刺激。
+- 如果 **SAN 值低于 30**，角色必须表现出非理性行为（幻觉、偏执、冲动），如果大纲让他表现得很冷静，必须 REJECT。
+
+**输出格式要求**：
+请输出一个 JSON 对象：
+```json
+{{
+    "status": "PASS" | "REJECT",
+    "conflict_analysis": "如果不通过，详细说明哪个角色的哪个行为违背了人设或情绪惯性。",
+    "suggestion": "如果不通过，给出修改大纲的建议，使行为合理化（例如：'增加一个发泄环节' 或 '让他先因愤怒而失误'）。"
+}}
+```
+"""
+
+SIMULATOR_CHECK_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SIMULATOR_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+    【角色精神轨迹 (Mental Curves)】：
+    {character_profiles}
+
+    【拟定大纲 (Proposed Outline)】：
+    {outline}
+
+    请开始心理沙盘推演。
+    """,
+        ),
+    ]
+)
 
 
 # --- Writer Agent (DeepSeek-V3) Prompts ---
@@ -72,9 +128,10 @@ WRITER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的金牌网文
 - **当前节拍**：请根据 Context 中的节拍提示，控制行文节奏（压抑、爆发、平缓）。
 
 写作要求：
-1. **氛围渲染 (Atmosphere)**：严格遵守大纲中的【环境氛围】设定（基调、感官、色调）。
-   - 如果基调是“压抑”，多用短句和冷色调词汇。
-   - 如果基调是“热血”，多用动词和感叹句。
+1. **氛围渲染 (Atmosphere)**：严格遵守大纲中的【环境氛围】设定。
+   - **Tension (紧张度)**：高 (>0.7) 则多用短句、倒计时、压抑的词汇；低 (<0.3) 则从容、舒缓。
+   - **Mystery (悬疑度)**：高 (>0.7) 则多用“阴影”、“未知”、“窥视感”；低则直白清晰。
+   - **Tone & Color**: 使用指定的【色调】来为场景上色（如“灰白”暗示死寂，“血红”暗示危险）。
 2. **Show, Don't Tell**：不要说“他很生气”，要写“他握剑的手指节发白，青筋暴起”。
 3. **环境共鸣**：环境描写要暗示人物命运或心境（如：大雨预示悲剧）。
 4. **网文爽感**：在冲突中确立主角的动机，在解决冲突时给予读者反馈。
@@ -83,9 +140,12 @@ WRITER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的金牌网文
 请严格按照大纲执行，不要随意增减角色。
 """
 
-WRITER_GEN_CHAPTER_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", WRITER_SYSTEM_PROMPT),
-    ("user", """
+WRITER_GEN_CHAPTER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", WRITER_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【本章大纲】：
     {outline}
 
@@ -93,12 +153,17 @@ WRITER_GEN_CHAPTER_PROMPT = ChatPromptTemplate.from_messages([
     {context_package}
 
     请开始创作正文。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
-WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", "你是一个苛刻的文学编辑。你的任务是检查草稿是否符合大纲要求。"),
-    ("user", """
+WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", "你是一个苛刻的文学编辑。你的任务是检查草稿是否符合大纲要求。"),
+        (
+            "user",
+            """
     【原始大纲】：
     {outline}
 
@@ -112,12 +177,17 @@ WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages([
 
     如果一切正常，请仅输出 "PASS"。
     如果有问题，请简要列出修改意见（3点以内）。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
-WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", "你是作家。根据编辑的意见修改草稿。"),
-    ("user", """
+WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", "你是作家。根据编辑的意见修改草稿。"),
+        (
+            "user",
+            """
     【原始草稿】：
     {draft}
 
@@ -125,8 +195,10 @@ WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages([
     {critique}
 
     请重写或修改草稿以解决上述问题。直接输出修改后的正文。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
 # --- Reviewer Agent (DeepSeek-R1) Prompts ---
 
@@ -146,9 +218,12 @@ REVIEWER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的毒舌书�
 如果没有问题，请直接输出“PASS”。
 """
 
-REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", REVIEWER_SYSTEM_PROMPT),
-    ("user", """
+REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", REVIEWER_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【历史设定/相关记忆】：
     {memory_context}
 
@@ -156,8 +231,10 @@ REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages([
     {content}
 
     请开始审核。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
 
 # --- Archivist Agent (DeepSeek-V3) Prompts ---
@@ -168,32 +245,23 @@ ARCHIVIST_SYSTEM_PROMPT = """你是网文世界的“首席档案官”，负责
 你的任务是输出一个详尽的 JSON 字符串（严禁包含 Markdown 标记），包含以下字段：
 
 1. **summary**: 200-300字的章节精炼摘要。
-2. **characters**: 角色更新列表。
+3. **characters**: 角色更新列表。
    - name: 角色名
    - aliases: (New) 别名/绰号/伪装身份列表。
    - location: (New) 角色当前所在地点（如：青云门、后山、未知）。
-   - importance: (New) 角色重要度。必须为 "Protagonist" (主角), "Major" (主要配角), "Minor" (次要), "NPC" (路人) 之一。
-   - updates: 包含 level(等级), status(状态), personality(New: 必须提供完整的当前性格标签列表，将覆盖旧数据), psychological_state(New: 当前心理状态), inventory(新增物品), removed_items(New: 本章消耗或丢失的物品列表), goals(New: 当前目标列表，将覆盖旧数据)
+   - importance: (New) 角色重要度。
+   - updates: 包含 level, status.
+   - personality: (New) 必须是字符串列表 (e.g. ["冷酷", "多疑"])，严禁使用逗号分隔的长字符串。
+   - goals: (New) 必须是字符串列表 (e.g. ["复仇", "寻找真相"])。
+   - mental_update: (New) 本章精神状态变更。
+       - state: 当前情绪/状态 (e.g. "恐惧", "冷静")
+       - intensity: 0-100 的数值。
+       - sanity: 0-100 的数值 (默认100，受惊吓或精神攻击时降低)。
+       - reason: 导致该状态的原因。
+   - inventory: 新增物品
+   - removed_items: 本章消耗或丢失的物品列表
    - dialogue_style: 说话风格
    - dialogue_examples: 1-3 句代表性台词
-3. **events**: 关键事件列表。
-   - character: 涉及的主角/关键配角
-   - type: 事件类型
-   - description: 简洁描述
-   - impact: 影响评估 (轻微, 中等, 重大)
-   - layer: (New) 事件所属层级 ('Reality', 'Dream', 'Hallucination', 'Simulation', 'History').
-4. **relationships**: 知识图谱三元组列表。
-   - source: 主体
-   - source_type: 主体类型
-   - relation: 关系类型 (全大写)
-   - target: 客体
-   - target_type: 客体类型
-   - desc: 关系描述
-   - is_negated: (New) 布尔值。如果关系结束，设为 true。
-5. **new_foreshadowing**: 新埋下的伏笔。
-6. **resolved_foreshadowing_ids**: 本章已回收的旧伏笔 ID 列表。
-7. **world_updates**: 世界观/设定更新。
-8. **current_date**: 更新后的世界日期。
 
 JSON 结构规范：
 {{
@@ -201,52 +269,64 @@ JSON 结构规范：
     "characters": [
         {{
             "name": "...", 
-            "aliases": ["..."], 
             "location": "...",
-            "importance": "...",
-            "updates": {{...}}, 
-            "dialogue_style": "...", 
-            "dialogue_examples": ["..."] 
+            "updates": {{
+                "level": "...",
+                "status": "...",
+                "personality": ["冷酷", "多疑"], // 必须是列表
+                "goals": ["复仇"] // 必须是列表
+            }},
+            "mental_update": {{
+                "state": "...", 
+                "intensity": 80, 
+                "sanity": 95, 
+                "reason": "..."
+            }}
         }}
     ],
     "events": [
         {{
-            "character": "...", 
+            "character": "萧风", // 必须是单个字符串
             "type": "...", 
             "description": "...", 
             "impact": "...", 
-            "layer": "Reality" 
+            "layer": "Reality" // 只能是: Reality, Dream, Hallucination, Simulation, History
         }}
     ],
     "relationships": [
         {{
-            "source": "...", 
-            "source_type": "...", 
-            "relation": "...", 
-            "target": "...", 
-            "target_type": "...", 
+            "source": "萧风", // 主体名
+            "source_type": "Character",
+            "relation": "ENEMY_OF", // 关系类型
+            "target": "赵虎", // 客体名
+            "target_type": "Character",
             "desc": "...",
             "is_negated": false
         }}
     ],
     "new_foreshadowing": [...],
-    "resolved_foreshadowing_ids": [],
+    "resolved_foreshadowing_ids": [1, 5], 
     "world_updates": [],
     "current_date": "..."
 }}
 """
 
-ARCHIVIST_EXTRACT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", ARCHIVIST_SYSTEM_PROMPT),
-    ("user", """
+ARCHIVIST_EXTRACT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", ARCHIVIST_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【当前世界日期】：{current_date}
 
     【正文内容】：
     {content}
 
     请提取数据更新并计算新日期。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
 # --- Summarizer Agent (DeepSeek-V3) Prompts ---
 
@@ -259,15 +339,48 @@ SUMMARIZER_SYSTEM_PROMPT = """你是专业的网文编辑，擅长进行剧情�
 3. **忽略水文**：忽略单纯的打斗细节或环境描写，只保留结果。
 """
 
-SUMMARIZER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SUMMARIZER_SYSTEM_PROMPT),
-    ("user", """
+SUMMARIZER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SUMMARIZER_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【章节正文】：
     {content}
 
     请生成摘要。
-    """)
-])
+    """,
+        ),
+    ]
+)
+
+SUMMARIZER_BATCH_SYSTEM_PROMPT = """你是一个负责编纂史册的记录官。
+你的任务是将一系列【章节摘要】融合成一个连贯的【阶段性综述】。
+
+输入是一组按顺序排列的单章摘要。
+你需要输出一个 400-600 字的综述。
+
+要求：
+1. **去粗取精**：删除琐碎的日常和打斗过程，只保留推动剧情发展的关键节点。
+2. **因果串联**：不要只是罗列“第一章发生了X，第二章发生了Y”，要写“因为第一章的X，导致了第二章的Y”。
+3. **宏观视角**：体现主角的成长、人际关系的变化以及世界局势的推移。
+4. **伏笔标记**：如果这期间埋下了重要伏笔，必须在综述中提及。
+"""
+
+SUMMARIZER_BATCH_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SUMMARIZER_BATCH_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+    【待聚合的章节摘要】：
+    {summaries}
+
+    请生成阶段性综述。
+    """,
+        ),
+    ]
+)
 
 # --- Foreshadowing Agent (DeepSeek-V3) Prompts ---
 
@@ -286,14 +399,17 @@ FORESHADOWING_SYSTEM_PROMPT = """你是网文界的“伏笔猎人”，拥有�
 
 判定标准：
 - **新伏笔 (new_clues)**：文中出现的神秘物品、未露面的神秘人、奇怪的预言、主角身体的异常反应等，明显是为后文做铺垫的内容。
-- **已回收 (resolved_clue_ids)**：如果正文明确解释了某个旧伏笔的真相，或该伏笔对应的事件已经结束，将其 ID 放入列表。
+- **已回收 (resolved_clue_ids)**：如果正文明确解释了某个旧伏笔的真相，或该伏笔对应的事件已经结束，将其 ID放入列表。
 
 如果没有变动，对应数组留空。
 """
 
-FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", FORESHADOWING_SYSTEM_PROMPT),
-    ("user", """
+FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", FORESHADOWING_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【待回收伏笔 (Active Hooks)】：
     {active_hooks}
 
@@ -301,8 +417,10 @@ FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
     {content}
 
     请分析伏笔变动。
-    """)
-])
+    """,
+        ),
+    ]
+)
 
 # --- Director Agent (DeepSeek-R1) Prompts ---
 
@@ -320,37 +438,44 @@ DIRECTOR_SYSTEM_PROMPT = """你是《无限流·小说工作室》的【总导�
 输出格式要求：
 你必须输出一个 JSON 对象，结构如下：
 ```json
-{
+{{
     "analysis": "简短犀利的现状分析 (e.g. '青云门篇幅严重超支，日常水文太多，必须立刻引发宗门大比')",
     "pacing_directive": "加速/减速/高潮/收尾/正常",
-    "narrative_focus_update": {
+    "narrative_focus_update": {{
         "current_beat": "新的节拍 (e.g. 危机爆发)",
         "current_goal": "修正后的短期目标",
         "current_conflict": "当前核心冲突",
         "world_state_summary": "更新后的世界背景 (e.g. 魔道入侵前夕，气氛压抑)"
-    },
+    }},
     "should_end_arc": boolean, // 是否建议立刻结束当前 Arc
     "global_event": "（可选）发生的全局大事件 (e.g. 天空出现裂痕，灵气复苏)",
     "critique": "对最近几章的毒舌批评 (指出最大的问题)"
-}
+}}
 ```
 """
 
-DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", DIRECTOR_SYSTEM_PROMPT),
-    ("user", """
+DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", DIRECTOR_SYSTEM_PROMPT),
+        (
+            "user",
+            """
     【当前规划 (Plan)】：
     Volume: {volume_name} ({volume_goal})
     Arc: {arc_name} ({arc_goal})
     进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)
     预估结束章节: {end_chapter_estimated}
 
-    【最近剧情摘要 (Last 5 Chapters)】：
+    【叙事历史脉络 (Narrative History)】：
     {recent_summaries}
 
     【当前叙事焦点】：
     {current_focus}
 
+    {chaos_injection}
+
     请进行审计与决策。
-    """)
-])
+    """,
+        ),
+    ]
+)

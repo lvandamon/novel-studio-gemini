@@ -5,6 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_reasoner
 from core.prompts import DIRECTOR_EVALUATE_PROMPT, DIRECTOR_SYSTEM_PROMPT
 from core.memory import MemoryManager
+from core.chaos import ChaosEngine
 
 class DirectorAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -12,6 +13,7 @@ class DirectorAgent:
         self.llm = get_deepseek_reasoner() 
         self.chain = DIRECTOR_EVALUATE_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
+        self.chaos_engine = ChaosEngine(base_probability=0.2) 
 
     def _clean_json(self, text: str) -> str:
         """
@@ -43,32 +45,72 @@ class DirectorAgent:
         # 1. 获取上下文数据
         plan = self.memory.get_active_plan()
         focus = self.memory.get_narrative_focus()
+
+        # Chaos Check
+        chaos_card = self.chaos_engine.roll_for_chaos(current_tension=0.5) # TODO: Use real tension metric
         
-        # 获取最近 5 章摘要
+        chaos_prompt_injection = ""
+        if chaos_card:
+            print(f"   🎲 混沌猴子介入! [{chaos_card['category']}] -> {chaos_card['description']}")
+            chaos_prompt_injection = f"""
+!!! 突发状况 (CHAOS EVENT) !!!
+系统强制触发了一个意外事件：【{chaos_card['category']} - {chaos_card['description']}】
+指令：你必须将此事件整合进当前的叙事决策中。它必须在接下来的 1-2 章内发生，打破原有的线性规划。
+"""
+        
+        # --- 构建分级历史视图 (Fractal History) ---
+        
+        # A. 历史卷综述 (Long-term)
+        vol_sums = self.memory.get_aggregated_summaries("volume")
+        vol_text = "\n".join([f"【卷{v['start']}-{v['end']}】{v['content']}" for v in vol_sums]) or "（暂无完结卷）"
+        
+        # B. 近期阶段综述 (Medium-term, last 3 batches)
+        batch_sums = self.memory.get_aggregated_summaries("batch_10")
+        recent_batches = batch_sums[-3:] if batch_sums else []
+        batch_text = "\n".join([f"【阶段{b['start']}-{b['end']}】{b['content']}" for b in recent_batches]) or "（暂无阶段综述）"
+        
+        # C. 当前未归档章节 (Short-term)
+        # 如果有 batch，从最后一个 batch 结束处开始；否则从头或者是最近 10 章
+        last_batch_end = recent_batches[-1]['end'] if recent_batches else 0
+        start_recent = max(last_batch_end + 1, current_chapter - 9) 
+        # 保证至少看最近 3 章 (即使刚归档)
+        start_recent = min(start_recent, max(1, current_chapter - 2))
+
         summaries = []
-        for i in range(max(1, current_chapter - 4), current_chapter + 1):
+        for i in range(start_recent, current_chapter + 1):
             s = self.memory.get_chapter_summary(i)
             summaries.append(f"Ch{i}: {s}")
-        recent_summaries_text = "\n".join(summaries)
+        recent_text = "\n".join(summaries)
+        
+        full_history_context = f"""
+=== 📜 历史卷宗 (Volume History) ===
+{vol_text}
+
+=== 📅 近期形势 (Recent Batches) ===
+{batch_text}
+
+=== ⚡️ 当前画面 (Immediate Context) ===
+{recent_text}
+"""
 
         # 计算进度
-        arc_data = plan.get("arc", {{}}) or {{}}
+        arc_data = plan.get("arc", {}) or {}
         start_chapter = arc_data.get("start_chapter", 1)
         chapters_used = current_chapter - start_chapter + 1
         
         # 2. 调用 LLM
         try:
             response = self.chain.invoke({
-                "volume_name": plan.get("volume", {{}}).get("name", "未命名卷"),
-                "volume_goal": plan.get("volume", {{}}).get("goal", "无"),
+                "volume_name": plan.get("volume", {}).get("name", "未命名卷"),
+                "volume_goal": plan.get("volume", {}).get("goal", "无"),
                 "arc_name": arc_data.get("name", "未命名单元"),
                 "arc_goal": arc_data.get("goal", "无"),
                 "start_chapter": start_chapter,
                 "current_chapter": current_chapter,
                 "chapters_used": chapters_used,
                 "end_chapter_estimated": arc_data.get("end_chapter_estimated", "未设定"),
-                "recent_summaries": recent_summaries_text,
-                "current_focus": json.dumps(focus, ensure_ascii=False)
+                "recent_summaries": full_history_context, # 传入分级历史
+                "current_focus": json.dumps(focus, ensure_ascii=False) + chaos_prompt_injection # 注入混沌
             })
             
             # 3. 解析结果 (Robust)

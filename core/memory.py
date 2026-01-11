@@ -149,6 +149,18 @@ class MemoryManager:
                 FOREIGN KEY(volume_id) REFERENCES volumes(id)
             )
         ''')
+
+        # 分级摘要表 (Fractal Summaries)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS summary_aggregations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT, -- 'batch_10', 'volume', 'global'
+                start_chapter INTEGER,
+                end_chapter INTEGER,
+                content TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -202,22 +214,23 @@ class MemoryManager:
             
             # --- 列表型字段处理策略 ---
             
-            # A. 覆盖型 (Last Write Wins): 避免状态无限堆积 (e.g. 性格分裂)
+            # A. 覆盖型 (Last Write Wins)
             # 如果提供了新的列表且非空，直接覆盖旧的。
             overwrite_keys = ["personality", "goals"]
             for key in overwrite_keys:
                 if key in update_data and update_data[key]:
                     merged_data[key] = update_data[key]
 
-            # B. 增量型 (Append/Merge): 累积数据
-            # dialogue_examples, aliases (别名通常只增不减), psychological_history (日志)
-            append_keys = ["dialogue_examples", "aliases", "psychological_history"]
+            # B. 增量型 (Append/Merge)
+            # dialogue_examples, aliases (别名通常只增不减), mental_ledger (账本)
+            append_keys = ["dialogue_examples", "aliases", "mental_ledger"]
             for list_key in append_keys:
                 old_list = merged_data.get(list_key, []) or []
                 new_list = update_data.get(list_key, []) or []
                 
-                if list_key == "psychological_history":
-                     # 日志型：简单追加
+                if list_key == "mental_ledger":
+                     # 账本型：简单追加 (Archive 负责生成 Entry)
+                     # 确保 new_list 里的 items 是字典 (如果是 Pydantic model dump 出来的)
                     merged_data[list_key] = old_list + new_list
                 else:
                     # 集合型：去重合并
@@ -417,9 +430,55 @@ class MemoryManager:
             
             if is_local or (include_global_protagonists and is_important):
                 role_info = f"{data.get('role', '未知')}/{data.get('level', '?')}"
-                relevant_chars.append(f"- {name} [{role_info}] @ {loc}")
+                
+                # 获取简单的状态描述
+                state = data.get("psychological_state", "平稳")
+                
+                relevant_chars.append(f"- {name} [{role_info}] @ {loc} (State: {state})")
                 
         return "\n".join(relevant_chars) if relevant_chars else "（当前地点无其他已知角色）"
+
+    def get_character_mental_curve(self, names: List[str], limit: int = 5) -> str:
+        """
+        获取角色精神心电图 (Mental Curve / Ledger Snapshot)
+        用于 Simulator 和 Writer 把控情绪惯性。
+        """
+        if not names: return "无在场角色。"
+        
+        curves = []
+        unique_ids = set()
+        for name in names:
+            uid = self._get_id_by_name(name)
+            if uid: unique_ids.add(uid)
+            
+        for uid in unique_ids:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT name, data FROM characters WHERE id = ?', (uid,))
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                name, data_json = row
+                data = json.loads(data_json)
+                ledger = data.get("mental_ledger", [])
+                
+                # 取最近的记录
+                recent = sorted(ledger, key=lambda x: x['chapter'])[-limit:]
+                
+                if not recent:
+                    curves.append(f"{name}: 暂无精神记录 (Default: 平稳)")
+                    continue
+                    
+                chart = f"📊 {name} 的精神轨迹:\n"
+                for entry in recent:
+                    # Visual bar for intensity
+                    bar = "█" * (entry.get('intensity', 0) // 10)
+                    sanity = entry.get('sanity', 100)
+                    chart += f"   - Ch{entry['chapter']}: {entry['state']} {bar} (SAN: {sanity}) -> {entry['reason']}\n"
+                curves.append(chart)
+                
+        return "\n".join(curves)
 
     def get_hard_logic_snapshot(self, names: List[str]) -> str:
         """
@@ -558,6 +617,33 @@ class MemoryManager:
             "chapters_since_last_beat": 0,
             "date": "天道历元年1月1日"
         }
+
+    # --- 分级摘要管理 (Fractal Summaries) ---
+
+    def save_aggregated_summary(self, level: str, start_chapter: int, end_chapter: int, content: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO summary_aggregations (level, start_chapter, end_chapter, content)
+            VALUES (?, ?, ?, ?)
+        ''', (level, start_chapter, end_chapter, content))
+        conn.commit()
+        conn.close()
+
+    def get_aggregated_summaries(self, level: str, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT start_chapter, end_chapter, content 
+            FROM summary_aggregations 
+            WHERE level = ? 
+            ORDER BY start_chapter ASC
+        ''', (level,)) # 获取所有历史摘要，按时间顺序
+        rows = cursor.fetchall()
+        conn.close()
+        # 如果 limit 限制，通常是取最近的？不，对于 Context 来说，可能需要全部 Volume 摘要
+        # 这里返回全部，由调用者裁剪
+        return [{"start": r[0], "end": r[1], "content": r[2]} for r in rows]
 
     # --- 规划管理 (分级大纲) ---
 

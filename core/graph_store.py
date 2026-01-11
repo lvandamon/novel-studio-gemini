@@ -25,46 +25,59 @@ class GraphManager:
 
     def is_connected(self) -> bool:
         return self.driver is not None
+        
+    def _sanitize_label(self, label: str) -> str:
+        """Sanitize label to be safe for Cypher by wrapping in backticks"""
+        # Remove any existing backticks to avoid injection
+        clean = label.replace("`", "")
+        return f"`{clean}`"
 
     def update_relationship(self, source: str, source_type: str, relation: str, target: str, target_type: str, properties: Dict = None, is_negated: bool = False, chapter_num: int = 0):
         """
         全能关系管理：支持建立新关系、更新属性、以及逻辑删除关系。
         """
         if not self.driver: return
+        
+        # Sanitize Labels
+        source_label = self._sanitize_label(source_type)
+        target_label = self._sanitize_label(target_type)
+        relation_type = self._sanitize_label(relation.upper()).replace("`", "") # Relation types usually don't need backticks if simple, but better safe. Actually, relationship types in Cypher usually stick to simple chars. But wrapping in backticks is valid for types too.
+        # Let's use backticks for relation type too.
+        relation_label = f"`{relation.upper().replace('`', '')}`"
+
 
         if is_negated:
-            self._logical_delete_relationship(source, relation, target, chapter_num)
+            self._logical_delete_relationship(source, relation_label, target, chapter_num)
         else:
-            self._upsert_relationship(source, source_type, relation, target, target_type, properties, chapter_num)
+            self._upsert_relationship(source, source_label, relation_label, target, target_label, properties, chapter_num)
 
-    def _logical_delete_relationship(self, source: str, relation: str, target: str, chapter_num: int):
+    def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
         query = f"""
-        MATCH (a {{name: $source}})-[r:{relation.upper()}]->(b {{name: $target}})
+        MATCH (a {{name: $source}})-[r:{relation_label}]->(b {{name: $target}})
         WHERE r.end_chapter IS NULL
         SET r.end_chapter = $chapter_num, r.updated_at = timestamp()
         """
         with self.driver.session() as session:
             session.run(query, source=source, target=target, chapter_num=chapter_num)
 
-    def _upsert_relationship(self, source: str, source_type: str, relation: str, target: str, target_type: str, properties: Dict = None, chapter_num: int = 0):
+    def _upsert_relationship(self, source: str, source_label: str, relation_label: str, target: str, target_label: str, properties: Dict = None, chapter_num: int = 0):
         """插入或更新关系，包含 start_chapter"""
-        # 如果已存在相同的关系且未结束，则更新属性
-        # 如果不存在，则创建并设置 start_chapter
+        # Note: source_label, target_label, relation_label MUST be pre-sanitized and include backticks if needed
+        
         query = f"""
-        MERGE (a:{source_type} {{name: $source_name}})
-        MERGE (b:{target_type} {{name: $target_name}})
+        MERGE (a:{source_label} {{name: $source_name}})
+        MERGE (b:{target_label} {{name: $target_name}})
         WITH a, b
-        MATCH (a)-[r:{relation.upper()}]->(b)
+        MATCH (a)-[r:{relation_label}]->(b)
         WHERE r.end_chapter IS NULL
         SET r.updated_at = timestamp()
         """
         
-        # 补充：如果 MATCH 没找到（即新关系），则用 MERGE 创建
         fallback_query = f"""
-        MERGE (a:{source_type} {{name: $source_name}})
-        MERGE (b:{target_type} {{name: $target_name}})
-        MERGE (a)-[r:{relation.upper()}]->(b)
+        MERGE (a:{source_label} {{name: $source_name}})
+        MERGE (b:{target_label} {{name: $target_name}})
+        MERGE (a)-[r:{relation_label}]->(b)
         ON CREATE SET r.start_chapter = $chapter_num, r.updated_at = timestamp()
         """
         
@@ -81,9 +94,7 @@ class GraphManager:
             fallback_query += f", {prop_set_clause}"
 
         with self.driver.session() as session:
-            # 尝试更新现有关系
             result = session.run(query, params)
-            # 如果没有更新（新关系或旧关系已结束），则创建新关系
             if result.consume().counters.properties_set == 0:
                 session.run(fallback_query, params)
 
