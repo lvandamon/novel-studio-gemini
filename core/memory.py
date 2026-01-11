@@ -177,7 +177,7 @@ class MemoryManager:
         conn.close()
 
     def upsert_character(self, name: str, update_data: Dict[str, Any], chapter_num: int = 0):
-        """智能合并角色档案 (支持 UUID 和 别名)"""
+        """智能合并角色档案 (支持 UUID 和 别名) - 200万字长篇优化版"""
         
         # 1. 解析身份
         char_id = self._get_id_by_name(name)
@@ -200,31 +200,54 @@ class MemoryManager:
         if existing_json:
             merged_data = existing_json.copy()
             
-            # 列表型字段取并集
-            list_keys = ["personality", "inventory", "goals", "dialogue_examples", "aliases", "psychological_history"]
-            for list_key in list_keys:
+            # --- 列表型字段处理策略 ---
+            
+            # A. 覆盖型 (Last Write Wins): 避免状态无限堆积 (e.g. 性格分裂)
+            # 如果提供了新的列表且非空，直接覆盖旧的。
+            overwrite_keys = ["personality", "goals"]
+            for key in overwrite_keys:
+                if key in update_data and update_data[key]:
+                    merged_data[key] = update_data[key]
+
+            # B. 增量型 (Append/Merge): 累积数据
+            # dialogue_examples, aliases (别名通常只增不减), psychological_history (日志)
+            append_keys = ["dialogue_examples", "aliases", "psychological_history"]
+            for list_key in append_keys:
                 old_list = merged_data.get(list_key, []) or []
                 new_list = update_data.get(list_key, []) or []
-                # 简单列表去重 (psychological_history 是 dict list, 不能直接 set, 需要特殊处理)
+                
                 if list_key == "psychological_history":
-                    # 简单追加即可，或者基于 chapter 去重
+                     # 日志型：简单追加
                     merged_data[list_key] = old_list + new_list
                 else:
+                    # 集合型：去重合并
                     merged_data[list_key] = list(set(old_list + new_list))
+
+            # C. 物品栏 (Inventory) 特殊处理: 支持增减
+            # 1. 添加新物品
+            current_inv = set(merged_data.get("inventory", []) or [])
+            new_inv = set(update_data.get("inventory", []) or [])
+            current_inv.update(new_inv)
             
-            # 字典型字段合并
+            # 2. 移除物品 (Explicit Removal)
+            removed_items = set(update_data.get("removed_items", []) or [])
+            current_inv.difference_update(removed_items)
+            
+            merged_data["inventory"] = list(current_inv)
+            
+            # --- 字典型字段合并 ---
             old_rel = merged_data.get("relationships", {}) or {}
             new_rel = update_data.get("relationships", {}) or {}
             old_rel.update(new_rel)
             merged_data["relationships"] = old_rel
 
-            # 心理状态特殊处理：如果有更新，则覆盖并记录历史（如果 update_data 里提供了 history，则上面已经合并了，这里主要处理 state）
+            # --- 心理状态特殊处理 ---
             if "psychological_state" in update_data and update_data["psychological_state"] != merged_data.get("psychological_state"):
                 old_state = merged_data.get("psychological_state", "未知")
                 new_state = update_data["psychological_state"]
-                # 自动记录一条历史 (如果 update_data 没显式提供 history)
+                # 自动记录一条历史
                 if not update_data.get("psychological_history"):
-                     merged_data["psychological_history"].append({
+                     merged_data.setdefault("psychological_history", []).append({
                         "chapter": chapter_num,
                         "state": new_state,
                         "change_from": old_state,
@@ -232,20 +255,34 @@ class MemoryManager:
                     })
                 merged_data["psychological_state"] = new_state
 
-            # 其他字段覆盖
-            exclude_keys = list_keys + ["relationships", "id", "psychological_state"] # id 和特殊处理字段不允许直接覆盖
+            # --- 其他字段覆盖 (Level, Status, Role, Importance) ---
+            # 这些字段通常是单值，直接覆盖
+            exclude_keys = overwrite_keys + append_keys + ["relationships", "id", "psychological_state", "inventory", "removed_items"]
             for k, v in update_data.items():
-                if k not in exclude_keys and v: 
+                if k not in exclude_keys and v is not None: 
                     merged_data[k] = v
         else:
+            # 全新角色
             merged_data = update_data
-            merged_data["id"] = char_id # 确保 ID 写入 JSON
-            merged_data["aliases"] = merged_data.get("aliases", [])
+            merged_data["id"] = char_id
+            
+            # 初始化列表 (防止 None)
+            for k in ["aliases", "personality", "goals", "inventory", "psychological_history", "dialogue_examples"]:
+                if k not in merged_data or merged_data[k] is None:
+                    merged_data[k] = []
+                    
             if name not in merged_data["aliases"]:
                 merged_data["aliases"].append(name)
+            
+            # 处理 Inventory/Removed logic even for new char (rare but consistent)
+            if "removed_items" in merged_data:
+                # remove from potentially initial inventory
+                inv = set(merged_data.get("inventory", []))
+                inv.difference_update(set(merged_data["removed_items"]))
+                merged_data["inventory"] = list(inv)
+                del merged_data["removed_items"]
 
         merged_data["last_updated_chapter"] = chapter_num
-        # 始终保持 name 为当前主要名称（如果需要）
         merged_data["name"] = name 
 
         # 3. 处理别名注册
@@ -254,6 +291,10 @@ class MemoryManager:
                 self._register_alias(alias, char_id)
 
         # 4. Schema 校验
+        # 移除临时字段 removed_items 以免 Pydantic 报错 (如果它不在 Schema 里)
+        if "removed_items" in merged_data:
+            del merged_data["removed_items"]
+            
         validated_data = CharacterSchema(**merged_data)
         
         # 5. 存入数据库
@@ -620,9 +661,9 @@ class MemoryManager:
         cursor = conn.cursor()
         candidates = {}
         # 只检索真实发生的事件 (Reality)
-        cursor.execute("SELECT id, chapter_num, description, event_type FROM events WHERE character_name = ? AND layer = 'Reality' ORDER BY chapter_num DESC LIMIT ?", (character_name, recent_k))
+        cursor.execute("SELECT id, chapter_num, description, event_type, layer FROM events WHERE character_name = ? AND layer = 'Reality' ORDER BY chapter_num DESC LIMIT ?", (character_name, recent_k))
         for row in cursor.fetchall():
-            candidates[row[0]] = {"chapter": row[1], "desc": row[2], "type": row[3], "source": "Recent"}
+            candidates[row[0]] = {"chapter": row[1], "desc": row[2], "type": row[3], "layer": row[4], "source": "Recent"}
         
         if query:
             # 向量检索

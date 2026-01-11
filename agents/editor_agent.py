@@ -1,12 +1,8 @@
 from core.llm import get_deepseek_reasoner
 from core.prompts import EDITOR_GEN_OUTLINE_PROMPT
 from langchain_core.output_parsers import StrOutputParser
-
 import json
 import re
-from core.llm import get_deepseek_reasoner
-from core.prompts import EDITOR_GEN_OUTLINE_PROMPT
-from langchain_core.output_parsers import StrOutputParser
 
 class EditorAgent:
     def __init__(self):

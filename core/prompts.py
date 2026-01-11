@@ -141,7 +141,7 @@ ARCHIVIST_SYSTEM_PROMPT = """你是网文世界的“首席档案官”，负责
    - aliases: (New) 别名/绰号/伪装身份列表。
    - location: (New) 角色当前所在地点（如：青云门、后山、未知）。
    - importance: (New) 角色重要度。必须为 "Protagonist" (主角), "Major" (主要配角), "Minor" (次要), "NPC" (路人) 之一。
-   - updates: 包含 level(等级), status(状态), personality(新增性格标签), psychological_state(New: 当前心理状态，如"绝望"/"狂喜")
+   - updates: 包含 level(等级), status(状态), personality(New: 必须提供完整的当前性格标签列表，将覆盖旧数据), psychological_state(New: 当前心理状态), inventory(新增物品), removed_items(New: 本章消耗或丢失的物品列表), goals(New: 当前目标列表，将覆盖旧数据)
    - dialogue_style: 说话风格
    - dialogue_examples: 1-3 句代表性台词
 3. **events**: 关键事件列表。
@@ -269,5 +269,56 @@ FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
     {content}
 
     请分析伏笔变动。
+    """)
+])
+
+# --- Director Agent (DeepSeek-R1) Prompts ---
+
+DIRECTOR_SYSTEM_PROMPT = """你是《无限流·小说工作室》的【总导演 (Director)】。
+你不对具体的文字负责，你只对【作品的生命周期】负责。你的眼中只有结构、节奏和留存率。
+
+你的核心职责是进行【宏观叙事审计】：
+1. **进度审计**：检查当前 Unit/Arc 是否严重超支（比如预计10章写完，现在已经写了15章还在铺垫）。
+2. **节奏调控**：根据当前进度，强制下达“节奏指令”。
+   - 如果进度滞后，下达 "Accelerate" (加速/砍支线)。
+   - 如果进度过快，下达 "Expand" (填充细节/增加阻碍)。
+   - 如果到达节点，下达 "Climax" (高潮) 或 "Conclusion" (收尾)。
+3. **世界推演**：主角在行动时，世界并没有静止。你需要根据剧情发展，更新【世界局势】。
+
+输出格式要求：
+你必须输出一个 JSON 对象，结构如下：
+```json
+{
+    "analysis": "简短犀利的现状分析 (e.g. '青云门篇幅严重超支，日常水文太多，必须立刻引发宗门大比')",
+    "pacing_directive": "加速/减速/高潮/收尾/正常",
+    "narrative_focus_update": {
+        "current_beat": "新的节拍 (e.g. 危机爆发)",
+        "current_goal": "修正后的短期目标",
+        "current_conflict": "当前核心冲突",
+        "world_state_summary": "更新后的世界背景 (e.g. 魔道入侵前夕，气氛压抑)"
+    },
+    "should_end_arc": boolean, // 是否建议立刻结束当前 Arc
+    "global_event": "（可选）发生的全局大事件 (e.g. 天空出现裂痕，灵气复苏)",
+    "critique": "对最近几章的毒舌批评 (指出最大的问题)"
+}
+```
+"""
+
+DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", DIRECTOR_SYSTEM_PROMPT),
+    ("user", """
+    【当前规划 (Plan)】：
+    Volume: {volume_name} ({volume_goal})
+    Arc: {arc_name} ({arc_goal})
+    进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)
+    预估结束章节: {end_chapter_estimated}
+
+    【最近剧情摘要 (Last 5 Chapters)】：
+    {recent_summaries}
+
+    【当前叙事焦点】：
+    {current_focus}
+
+    请进行审计与决策。
     """)
 ])

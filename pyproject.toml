@@ -21,3 +21,8 @@ dependencies = [
     "streamlit>=1.52.2",
     "watchdog>=6.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
