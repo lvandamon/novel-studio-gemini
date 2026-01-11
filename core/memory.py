@@ -1,4 +1,4 @@
-from core.schemas import CharacterSchema, RealityLayer
+from core.schemas import CharacterSchema, RealityLayer, ArcStatus, VolumeSchema, ArcSchema
 import sqlite3
 import json
 import os
@@ -122,6 +122,33 @@ class MemoryManager:
                 current_date TEXT DEFAULT '天道历元年1月1日'
             )
         ''')
+
+        # 卷管理表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS volumes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT,
+                goal TEXT,
+                status TEXT DEFAULT 'planned'
+            )
+        ''')
+
+        # 单元管理表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS arcs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                volume_id INTEGER,
+                name TEXT,
+                description TEXT,
+                goal TEXT,
+                key_events JSON, 
+                start_chapter INTEGER,
+                end_chapter_estimated INTEGER,
+                status TEXT DEFAULT 'planned',
+                FOREIGN KEY(volume_id) REFERENCES volumes(id)
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -174,11 +201,16 @@ class MemoryManager:
             merged_data = existing_json.copy()
             
             # 列表型字段取并集
-            list_keys = ["personality", "inventory", "goals", "dialogue_examples", "aliases"]
+            list_keys = ["personality", "inventory", "goals", "dialogue_examples", "aliases", "psychological_history"]
             for list_key in list_keys:
                 old_list = merged_data.get(list_key, []) or []
                 new_list = update_data.get(list_key, []) or []
-                merged_data[list_key] = list(set(old_list + new_list))
+                # 简单列表去重 (psychological_history 是 dict list, 不能直接 set, 需要特殊处理)
+                if list_key == "psychological_history":
+                    # 简单追加即可，或者基于 chapter 去重
+                    merged_data[list_key] = old_list + new_list
+                else:
+                    merged_data[list_key] = list(set(old_list + new_list))
             
             # 字典型字段合并
             old_rel = merged_data.get("relationships", {}) or {}
@@ -186,8 +218,22 @@ class MemoryManager:
             old_rel.update(new_rel)
             merged_data["relationships"] = old_rel
 
+            # 心理状态特殊处理：如果有更新，则覆盖并记录历史（如果 update_data 里提供了 history，则上面已经合并了，这里主要处理 state）
+            if "psychological_state" in update_data and update_data["psychological_state"] != merged_data.get("psychological_state"):
+                old_state = merged_data.get("psychological_state", "未知")
+                new_state = update_data["psychological_state"]
+                # 自动记录一条历史 (如果 update_data 没显式提供 history)
+                if not update_data.get("psychological_history"):
+                     merged_data["psychological_history"].append({
+                        "chapter": chapter_num,
+                        "state": new_state,
+                        "change_from": old_state,
+                        "note": "State update detected"
+                    })
+                merged_data["psychological_state"] = new_state
+
             # 其他字段覆盖
-            exclude_keys = list_keys + ["relationships", "id"] # id 不允许覆盖
+            exclude_keys = list_keys + ["relationships", "id", "psychological_state"] # id 和特殊处理字段不允许直接覆盖
             for k, v in update_data.items():
                 if k not in exclude_keys and v: 
                     merged_data[k] = v
@@ -334,6 +380,46 @@ class MemoryManager:
                 
         return "\n".join(relevant_chars) if relevant_chars else "（当前地点无其他已知角色）"
 
+    def get_hard_logic_snapshot(self, names: List[str]) -> str:
+        """
+        获取硬逻辑快照 (Hard Logic Snapshot)
+        用于 Reviewer 进行逻辑一致性检查。返回关键状态字段。
+        """
+        if not names: return "无相关实体。"
+        
+        snapshot = []
+        unique_ids = set()
+        for name in names:
+            uid = self._get_id_by_name(name)
+            if uid: unique_ids.add(uid)
+            
+        for uid in unique_ids:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT name, data FROM characters WHERE id = ?', (uid,))
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                name, data_json = row
+                data = json.loads(data_json)
+                
+                # 提取硬逻辑字段
+                state = data.get("current_state", "正常")
+                loc = data.get("location", "未知")
+                inventory = data.get("inventory", [])
+                level = data.get("level", "未知")
+                
+                # 格式化
+                info = f"--- {name} ---\n"
+                info += f"状态: {state}\n"
+                info += f"位置: {loc}\n"
+                info += f"境界: {level}\n"
+                info += f"物品栏: {', '.join(inventory) if inventory else '空'}\n"
+                snapshot.append(info)
+                
+        return "\n".join(snapshot) if snapshot else "无有效硬逻辑数据。"
+
     # --- 章节与节奏 ---
 
     def update_chapter_summary(self, chapter_num: int, summary: str):
@@ -431,6 +517,89 @@ class MemoryManager:
             "chapters_since_last_beat": 0,
             "date": "天道历元年1月1日"
         }
+
+    # --- 规划管理 (分级大纲) ---
+
+    def create_volume(self, name: str, description: str, goal: str) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO volumes (name, description, goal, status) 
+            VALUES (?, ?, ?, ?)
+        ''', (name, description, goal, ArcStatus.PLANNED.value))
+        vol_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return vol_id
+
+    def create_arc(self, volume_id: int, name: str, description: str, goal: str, key_events: List[str], start_chapter: int = None) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO arcs (volume_id, name, description, goal, key_events, start_chapter, status) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (volume_id, name, description, goal, json.dumps(key_events), start_chapter, ArcStatus.PLANNED.value))
+        arc_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return arc_id
+
+    def activate_arc(self, arc_id: int, start_chapter: int):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # 1. 激活新 Arc
+        cursor.execute('UPDATE arcs SET status = ?, start_chapter = ? WHERE id = ?', (ArcStatus.ACTIVE.value, start_chapter, arc_id))
+        
+        # 2. 同时激活对应的 Volume (如果还没激活)
+        cursor.execute('SELECT volume_id FROM arcs WHERE id = ?', (arc_id,))
+        row = cursor.fetchone()
+        if row:
+            vol_id = row[0]
+            cursor.execute('UPDATE volumes SET status = ? WHERE id = ? AND status = ?', (ArcStatus.ACTIVE.value, vol_id, ArcStatus.PLANNED.value))
+            
+        conn.commit()
+        conn.close()
+
+    def get_active_plan(self) -> Dict[str, Any]:
+        """获取当前激活的 Volume 和 Arc 详情"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        plan = {"volume": None, "arc": None}
+        
+        # 查找 Active Volume
+        cursor.execute('SELECT id, name, description, goal FROM volumes WHERE status = ? LIMIT 1', (ArcStatus.ACTIVE.value,))
+        vol_row = cursor.fetchone()
+        if vol_row:
+            plan["volume"] = {
+                "id": vol_row[0],
+                "name": vol_row[1],
+                "description": vol_row[2],
+                "goal": vol_row[3]
+            }
+            
+            # 查找 Active Arc under this volume
+            cursor.execute('SELECT id, name, description, goal, key_events, start_chapter FROM arcs WHERE volume_id = ? AND status = ? LIMIT 1', (vol_row[0], ArcStatus.ACTIVE.value))
+            arc_row = cursor.fetchone()
+            if arc_row:
+                 plan["arc"] = {
+                    "id": arc_row[0],
+                    "name": arc_row[1],
+                    "description": arc_row[2],
+                    "goal": arc_row[3],
+                    "key_events": json.loads(arc_row[4]),
+                    "start_chapter": arc_row[5]
+                }
+        
+        conn.close()
+        return plan
+
+    def complete_arc(self, arc_id: int, end_chapter: int):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE arcs SET status = ?, end_chapter_estimated = ? WHERE id = ?', (ArcStatus.COMPLETED.value, end_chapter, arc_id))
+        conn.commit()
+        conn.close()
 
     # --- 事件与伏笔 (支持 RealityLayer) ---
 

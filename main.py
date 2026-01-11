@@ -199,6 +199,7 @@ class NovelStudioShell(cmd.Cmd):
         # 组装 Writer 需要的详细上下文 (含 RAG, 图谱, 地理围栏)
         active_chars = outline_data.get("active_characters", [])
         scene_loc = outline_data.get("scene_location", "未知")
+        atmosphere = outline_data.get("atmosphere", None) # 获取氛围设定
         
         # 无论 outline 是 list 还是 str，都转成 str 给 writer
         outline_str = "\n".join(outline_list) if isinstance(outline_list, list) else str(outline_list)
@@ -207,7 +208,8 @@ class NovelStudioShell(cmd.Cmd):
             chapter_num=chap_num, 
             outline=outline_str, 
             active_characters=active_chars,
-            scene_location=scene_loc
+            scene_location=scene_loc,
+            atmosphere=atmosphere
         )
         
         content = self.writer.write_chapter(outline_str, writer_ctx)

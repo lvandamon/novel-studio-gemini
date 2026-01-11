@@ -53,19 +53,44 @@ class ReviewerAgent:
             
         return "\n".join(result)
 
+    def _extract_entities(self, content: str) -> List[str]:
+        """
+        简单提取文中的人名实体 (为了效率暂用规则+已有名单匹配)
+        TODO: 以后可以用 LLM 做 NER
+        """
+        # 获取所有已知角色名
+        all_chars = [c['name'] for c in self.memory.get_all_characters_list()]
+        found = []
+        for name in all_chars:
+            if name in content:
+                found.append(name)
+        return list(set(found))
+
     def review_draft(self, content: str) -> str:
         """
         检索相关记忆并审核正文
         """
         print("🧐 书评人 (Reviewer) 正在审视稿件...")
         
-        # 1. 获取综合上下文 (Multi-Hop Retrieval)
+        # 1. 获取综合上下文 (Multi-Hop Retrieval - 软逻辑)
         related_memory = self._get_comprehensive_context(content)
         
-        # 2. 调用 R1 进行审核
-        # R1 的 Context Window 很大，可以一次性吞下全文 + 检索到的碎片
+        # 2. 获取硬逻辑快照 (Hard Logic Snapshot)
+        entities = self._extract_entities(content)
+        hard_logic = self.memory.get_hard_logic_snapshot(entities)
+        
+        # 3. 组合 Context
+        full_context = f"""
+【硬逻辑快照 (Hard Logic)】(必须严格遵守):
+{hard_logic}
+
+【模糊记忆 (Soft Memory)】:
+{related_memory}
+"""
+        
+        # 4. 调用 R1 进行审核
         feedback = self.chain.invoke({
-            "memory_context": related_memory,
+            "memory_context": full_context,
             "content": content
         })
         

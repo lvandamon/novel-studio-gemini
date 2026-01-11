@@ -9,17 +9,29 @@ class ContextManager:
         """
         为 Editor (主编) 组装上下文。
         """
-        # 1. Global Context
+        # 1. Global Context & Plan
         focus = self.memory.get_narrative_focus()
+        active_plan = self.memory.get_active_plan()
+        
+        plan_text = ""
+        if active_plan["volume"]:
+            vol = active_plan["volume"]
+            plan_text += f"【当前卷 ({vol['name']})】：{vol['goal']}\n"
+        if active_plan["arc"]:
+            arc = active_plan["arc"]
+            events_str = ", ".join(arc['key_events'])
+            plan_text += f"【当前单元 ({arc['name']})】：{arc['goal']}\n"
+            plan_text += f"  -> 关键节点规划: [{events_str}]\n"
+
         pacing_warning = ""
         if focus.get('chapters_since_last_beat', 0) >= 3:
             pacing_warning = f"\n⚠️ 【节奏警告】：当前节拍已持续 {focus['chapters_since_last_beat']} 章，请加速！"
 
         global_context = f"""
-【当前进度】：第 {chapter_num} 章 (位于 {focus['volume']} / {focus['arc']})
+【当前进度】：第 {chapter_num} 章
+{plan_text}
 【当前节拍】：{focus['beat']} {pacing_warning}
-【本单元目标】：{focus['goal']}
-【核心冲突】：{focus['conflict']}
+【本节拍冲突】：{focus['conflict']}
 【世界动态】：{focus['state']}
 """
         
@@ -43,16 +55,27 @@ class ContextManager:
 {summary}
 """
 
-    def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str = "未知") -> str:
+    def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str = "未知", atmosphere: Dict[str, str] = None) -> str:
         """
         为 Writer (作家) 组装上下文。
         """
         # 1. Global Tier
         focus = self.memory.get_narrative_focus()
+        
+        atm_text = ""
+        if atmosphere:
+            atm_text = f"""
+【环境氛围 (Atmosphere)】：
+- 基调 (Tone): {atmosphere.get('tone', '默认')}
+- 感官侧重 (Sensory): {atmosphere.get('sensory_focus', '均衡')}
+- 视觉色调 (Color): {atmosphere.get('color_palette', '正常')}
+"""
+
         global_tier = f"""
 【世界观基调】：修仙、残酷、凡人流。
 【当前目标】：{focus['goal']}
 【当前场景】：{scene_location}
+{atm_text}
 """
 
         # 2. Tier 2: Active Characters (详细档案)
