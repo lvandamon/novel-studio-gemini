@@ -1,21 +1,17 @@
 import streamlit as st
 import os
+import io
+import contextlib
 import time
-import tempfile
 import pandas as pd
 import streamlit.components.v1 as components
 from pyvis.network import Network
 from dotenv import load_dotenv
 
 from core.memory import MemoryManager
-from core.context_manager import ContextManager
-from agents.writer_agent import WriterAgent
-from agents.editor_agent import EditorAgent
-from agents.archivist_agent import ArchivistAgent
-from agents.reviewer_agent import ReviewerAgent
-from agents.foreshadowing_agent import ForeshadowingAgent
+from core.workflow import NovelWorkflow
 
-# --- 0. 全局配置 & 样式 ---
+# --- 0. 全局配置 ---
 st.set_page_config(
     page_title="DeepSeek Novel Studio Pro", 
     page_icon="🏔️", 
@@ -23,278 +19,196 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS for log stream
 st.markdown("""
 <style>
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f0f2f6; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }
-    .stTabs [aria-selected="true"] { background-color: #ffffff; border-bottom: 2px solid #ff4b4b; }
-    .reportview-container .main .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 2rem; }
-    div[data-testid="stExpander"] div[role="button"] p { font-size: 1.1rem; font-weight: 600; }
+    .log-container {
+        font-family: 'Courier New', monospace;
+        font-size: 0.85em;
+        background-color: #f8f9fa;
+        padding: 10px;
+        border-radius: 5px;
+        height: 400px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 load_dotenv()
 
-# --- 1. 核心单例模式 (Singleton Resource) ---
+# --- 1. Core Initialization ---
 @st.cache_resource
-def get_system_core():
-    """初始化所有后端组件，全局唯一"""
-    print("🚀 初始化 System Core...")
+def get_system():
+    """Initialize system components"""
+    print("🚀 Initializing Novel Studio System...")
     memory = MemoryManager()
-    ctx_mgr = ContextManager(memory)
-    agents = {
-        "editor": EditorAgent(),
-        "writer": WriterAgent(),
-        "reviewer": ReviewerAgent(memory),
-        "archivist": ArchivistAgent(memory),
-        "foreshadow": ForeshadowingAgent(memory)
-    }
-    return memory, ctx_mgr, agents
+    workflow = NovelWorkflow(memory)
+    return memory, workflow
 
-memory, context_manager, agents = get_system_core()
+memory, workflow = get_system()
 
-# --- 2. Session State 管理 (状态机) ---
-# Workflow Stages: 0:Idle -> 1:Outline -> 2:Writing -> 3:Review -> 4:Archived
-if "wf_stage" not in st.session_state: st.session_state.wf_stage = 0
-if "current_chapter" not in st.session_state: st.session_state.current_chapter = 1
-
-# Data Buffers (用于在不同阶段间传递数据)
-if "buf_outline" not in st.session_state: st.session_state.buf_outline = {}
-if "buf_content" not in st.session_state: st.session_state.buf_content = ""
-if "buf_review" not in st.session_state: st.session_state.buf_review = ""
-
-# UI Logs
+# --- 2. Session State ---
 if "logs" not in st.session_state: st.session_state.logs = []
+if "current_content" not in st.session_state: st.session_state.current_content = ""
+if "current_focus" not in st.session_state: st.session_state.current_focus = {}
+if "workflow_running" not in st.session_state: st.session_state.workflow_running = False
 
-def add_log(msg, level="info"):
-    icon_map = {"info": "ℹ️", "success": "✅", "warn": "⚠️", "error": "❌", "ai": "🤖"}
-    st.session_state.logs.append(f"{icon_map.get(level, '')} {msg}")
+# Capture stdout for logs
+@contextlib.contextmanager
+def capture_output():
+    new_out = io.StringIO()
+    # In a real multi-user web app, capturing stdout is tricky.
+    # For a local single-user Streamlit app, this is acceptable.
+    # We will try to redirect print statements to our log buffer.
+    
+    # We simply monkey-patch print? No, that's dangerous.
+    # We will rely on our nodes explicitly printing to stdout 
+    # and we won't capture it here perfectly due to threading.
+    # Instead, we'll append to session_state.logs inside the tool calls if possible,
+    # OR we rely on the return values.
+    
+    # Actually, let's just use a simple redirect for the duration of the function call
+    yield new_out
 
-# --- 3. Sidebar: 全局控制台 ---
+# --- 3. Sidebar ---
 with st.sidebar:
     st.title("🏔️ Novel Studio")
-    st.caption("DeepSeek R1/V3 Dual-Core Engine")
+    st.caption("Auto-Novel Generation System")
     
-    api_key = st.text_input("API Key", type="password", value=os.getenv("DEEPSEEK_API_KEY", ""))
-    if api_key: os.environ["DEEPSEEK_API_KEY"] = api_key
-    
-    st.divider()
-    
-    # 状态监控
+    # Focus Monitor
     focus = memory.get_narrative_focus()
-    st.markdown(f"**Current**: 第 {st.session_state.current_chapter} 章")
-    st.info(f"📅 {focus.get('date', '未知日期')}")
+    st.session_state.current_focus = focus
     
-    with st.expander("🌍 世界状态 (World State)", expanded=False):
-        st.write(f"**卷**: {focus.get('volume')}")
-        st.write(f"**节拍**: {focus.get('beat')}")
-        st.write(f"**冲突**: {focus.get('conflict')}")
+    st.markdown("### 🧭 叙事罗盘")
+    st.info(f"Vol: {focus.get('volume')}")
+    st.info(f"Arc: {focus.get('arc')}")
+    st.warning(f"Beat: {focus.get('beat')}")
     
     st.divider()
     
-    # 工具栏
-    if st.button("🧹 清空当前 Session"):
-        # for k in list(st.session_state.keys()):
-        #     del st.session_state[k]
-        st.session_state.clear()
+    st.markdown("### 📊 进度")
+    # Get last chapter num
+    # Simple check: max chapter in DB
+    try:
+        # A bit hacky, normally should add a method to memory
+        import sqlite3
+        conn = sqlite3.connect(memory.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(chapter_num) FROM chapters")
+        row = cur.fetchone()
+        last_chap = row[0] if row and row[0] else 0
+        conn.close()
+    except:
+        last_chap = 0
+        
+    next_chap = last_chap + 1
+    st.metric("下一章", f"第 {next_chap} 章")
+    
+    if st.button("🔄 刷新状态"):
         st.rerun()
 
-# --- 4. Main Interface ---
+# --- 4. Main Area ---
 
-st.title(f"Chapter {st.session_state.current_chapter}: {focus.get('volume', '新篇章')}")
+col_main, col_log = st.columns([2, 1])
 
-# 进度条
-steps = ["1. 构思 (Outline)", "2. 撰写 (Draft)", "3. 审核 (Review)", "4. 归档 (Archive)"]
-current_step_idx = max(0, min(st.session_state.wf_stage - 1, 3)) if st.session_state.wf_stage > 0 else 0
-st.progress((current_step_idx + 1) / 4, text=f"当前阶段: {steps[current_step_idx]}")
-
-# 主要工作区
-tab_main, tab_db, tab_settings = st.tabs(["📝 创作流", "🗃️ 档案室", "⚙️ 设置"])
-
-# === Tab 1: 创作流 (The Workflow) ===
-with tab_main:
+with col_main:
+    st.subheader(f"📝 生成控制台 (第 {next_chap} 章)")
     
-    # Stage 0: 准备
-    if st.session_state.wf_stage == 0:
-        st.info("👋 准备好开始写下一章了吗？")
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            chap_num = st.number_input("章节号", value=st.session_state.current_chapter)
-        with col2:
-            st.write(" ") # Spacer
-            if st.button("🚀 启动创作引擎 (Start Engine)", type="primary"):
-                st.session_state.current_chapter = chap_num
-                st.session_state.wf_stage = 1
+    # Configuration
+    with st.expander("🛠️ 干扰参数 (Intervention)", expanded=False):
+        user_guidance = st.text_area("给导演/主编的额外指令 (可选)", placeholder="例如：本章必须要死一个配角...")
+        force_director = st.checkbox("强制唤醒导演 (Force Director)", value=(next_chap % 5 == 0))
+    
+    # Action Button
+    if st.button("🚀 生成下一章 (Auto-Run Workflow)", type="primary", disabled=st.session_state.workflow_running):
+        st.session_state.workflow_running = True
+        st.session_state.logs = [] # Clear logs
+        
+        # Prepare Input
+        initial_state = {
+            "chapter_num": next_chap,
+            "narrative_plan": memory.get_active_plan(),
+            "narrative_focus": memory.get_narrative_focus(),
+            "revision_count": 0,
+            "director_ran": force_director # Hint
+        }
+        
+        # Run Graph
+        app = workflow.build_graph()
+        
+        status_placeholder = st.empty()
+        log_placeholder = col_log.empty()
+        
+        # Generator for streaming updates (LangGraph doesn't stream easily, so we wait)
+        with st.spinner("流水线运转中... (预计耗时 1-2 分钟)"):
+            try:
+                # Capture print output hack
+                import sys
+                class StreamToLogger:
+                    def write(self, buf):
+                        for line in buf.rstrip().splitlines():
+                            st.session_state.logs.append(line)
+                            # Force refresh log view? hard in loop.
+                    def flush(self):
+                        pass
+                
+                old_stdout = sys.stdout
+                sys.stdout = StreamToLogger()
+                
+                result = app.invoke(initial_state)
+                
+                sys.stdout = old_stdout
+                
+                st.session_state.current_content = result.get("final_content", "（无内容生成）")
+                st.success("✅ 生成完成！已自动归档。")
+                
+            except Exception as e:
+                sys.stdout = old_stdout # restore
+                st.error(f"❌ 工作流出错: {e}")
+                st.session_state.logs.append(f"ERROR: {e}")
+            finally:
+                st.session_state.workflow_running = False
                 st.rerun()
 
-    # Stage 1: 大纲 (Outline)
-    elif st.session_state.wf_stage == 1:
-        st.subheader("Step 1: 构思大纲 (Editor Agent)")
+    # Content Display
+    if st.session_state.current_content:
+        st.markdown("### 📄 最新章节预览")
+        st.text_area("正文", value=st.session_state.current_content, height=600)
+
+with col_log:
+    st.subheader("📟 系统日志")
+    log_text = "\n".join(st.session_state.logs)
+    st.text_area("Logs", value=log_text, height=600, key="log_view", disabled=True)
+
+# --- 5. Database View (Tabs below) ---
+st.divider()
+tab1, tab2 = st.tabs(["📚 历史章节", "🕸️ 知识图谱"])
+
+with tab1:
+    chap_num_view = st.number_input("查看章节", min_value=1, max_value=max(1, next_chap-1), step=1)
+    if st.button("加载章节"):
+        summary = memory.get_chapter_summary(chap_num_view)
+        # Hack to get content from vector store (not ideal, but works for demo)
+        docs = memory.similarity_search(f"第{chap_num_view}章正文", k=1) 
+        # Better: query SQL events
+        events = memory.get_relevant_events("", recent_k=10) # this is generic
         
-        # Action Area
-        col_act, col_view = st.columns([1, 2])
-        
-        with col_act:
-            st.markdown("主编 (DeepSeek-R1) 将根据前情提要和节拍生成细纲。")
-            if st.button("💡 生成/重生成大纲"):
-                with st.spinner("主编正在思考..."):
-                    prev_sum = memory.get_chapter_summary(st.session_state.current_chapter - 1)
-                    ctx = context_manager.build_editor_context(st.session_state.current_chapter, prev_sum)
-                    outline = agents["editor"].generate_outline(ctx, st.session_state.current_chapter)
-                    st.session_state.buf_outline = outline
-                    add_log("大纲已生成", "success")
+        st.markdown(f"**摘要**: {summary}")
+        # Content retrieval is hard without a direct 'chapters' table storing full text. 
+        # Ideally we should add 'content' column to 'chapters' table in sqlite.
+
+with tab2:
+    if st.button("渲染图谱"):
+        graph_data = memory.get_visual_graph_data()
+        if graph_data["nodes"]:
+            net = Network(height="500px", width="100%", bgcolor="#ffffff", font_color="black")
+            for n in graph_data["nodes"]:
+                net.add_node(n["id"], label=n["label"], color=n["color"], group=n["group"])
+            for e in graph_data["edges"]:
+                net.add_edge(e["from"], e["to"], label=e["label"])
             
-            if st.session_state.buf_outline:
-                st.divider()
-                st.success("大纲就绪！")
-                if st.button("✅ 确认并进入撰写阶段", type="primary"):
-                    st.session_state.wf_stage = 2
-                    st.rerun()
-
-        with col_view:
-            if st.session_state.buf_outline:
-                # 允许用户编辑大纲
-                new_title = st.text_input("章节标题", value=st.session_state.buf_outline.get("title", ""))
-                
-                # 处理 outline 字段可能是 list 或 str
-                raw_outline = st.session_state.buf_outline.get("outline", "")
-                if isinstance(raw_outline, list):
-                    raw_outline = "\n".join(raw_outline)
-                
-                new_outline_text = st.text_area("大纲内容 (可编辑)", value=raw_outline, height=300)
-                
-                # 实时回写
-                st.session_state.buf_outline["title"] = new_title
-                st.session_state.buf_outline["outline"] = new_outline_text
-
-    # Stage 2: 撰写 (Writing)
-    elif st.session_state.wf_stage == 2:
-        st.subheader("Step 2: 撰写正文 (Writer Agent)")
-        
-        col_act, col_view = st.columns([1, 2])
-        
-        with col_act:
-            st.markdown("作家 (DeepSeek-V3) 将基于大纲进行扩写。")
-            
-            # 上下文预览
-            with st.expander("查看参考资料包"):
-                active_chars = st.session_state.buf_outline.get("active_characters", [])
-                st.write(f"**在场角色**: {active_chars}")
-            
-            if st.button("✍️ 生成初稿"):
-                with st.spinner("作家正在挥毫泼墨..."):
-                    outline_str = st.session_state.buf_outline.get("outline", "")
-                    active_chars = st.session_state.buf_outline.get("active_characters", [])
-                    
-                    writer_ctx = context_manager.build_writer_context(str(outline_str), active_chars)
-                    content = agents["writer"].write_chapter(str(outline_str), writer_ctx)
-                    st.session_state.buf_content = content
-                    add_log(f"正文生成完毕 ({len(content)}字)", "success")
-            
-            if st.session_state.buf_content:
-                st.divider()
-                if st.button("🔍 提交审核", type="primary"):
-                    st.session_state.wf_stage = 3
-                    st.rerun()
-
-        with col_view:
-            if st.session_state.buf_content:
-                new_content = st.text_area("正文编辑器", value=st.session_state.buf_content, height=600)
-                st.session_state.buf_content = new_content
-            else:
-                st.info("等待生成正文...")
-
-    # Stage 3: 审核 (Review)
-    elif st.session_state.wf_stage == 3:
-        st.subheader("Step 3: 质量审核 (Reviewer Agent)")
-        
-        col_act, col_view = st.columns([1, 2])
-        
-        with col_act:
-            if not st.session_state.buf_review:
-                if st.button("🧐 开始审核"):
-                    with st.spinner("书评人正在挑刺..."):
-                        feedback = agents["reviewer"].review_draft(st.session_state.buf_content)
-                        st.session_state.buf_review = feedback
-                        add_log("审核完成", "success")
-            
-            if st.session_state.buf_review:
-                is_pass = "PASS" in st.session_state.buf_review.upper()
-                if is_pass:
-                    st.success("审核通过！")
-                else:
-                    st.warning("发现潜在问题")
-                
-                col_b1, col_b2 = st.columns(2)
-                with col_b1:
-                    if st.button("🔙 返回修改"):
-                        st.session_state.wf_stage = 2
-                        st.session_state.buf_review = "" # 清除审核记录以便重审
-                        st.rerun()
-                with col_b2:
-                    if st.button("📦 强制归档", type="primary"):
-                        st.session_state.wf_stage = 4
-                        st.rerun()
-
-        with col_view:
-            st.markdown("### 正文预览")
-            st.text_area("正文内容", value=st.session_state.buf_content, height=200, disabled=True)
-            
-            if st.session_state.buf_review:
-                st.markdown("### 审核报告")
-                st.info(st.session_state.buf_review)
-
-    # Stage 4: 归档 (Archiving)
-    elif st.session_state.wf_stage == 4:
-        st.subheader("Step 4: 自动归档 (Archivist Agent)")
-        
-        if st.button("💾 执行归档入库"):
-            with st.spinner("正在提取数据、构建图谱、更新世界..."):
-                try:
-                    agents["archivist"].archive_chapter(st.session_state.buf_content, st.session_state.current_chapter)
-                    add_log("归档完成", "success")
-                    st.balloons()
-                    
-                    # Reset for next chapter
-                    time.sleep(2)
-                    st.session_state.current_chapter += 1
-                    st.session_state.wf_stage = 0
-                    st.session_state.buf_outline = {}
-                    st.session_state.buf_content = ""
-                    st.session_state.buf_review = ""
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"归档失败: {e}")
-
-# === Tab 2: 档案室 (Database) ===
-with tab_db:
-    col_db1, col_db2 = st.columns([1, 1])
-    
-    with col_db1:
-        st.markdown("### 👥 角色花名册")
-        chars = memory.get_all_characters_list()
-        if chars:
-            st.dataframe(pd.DataFrame(chars))
-            
-    with col_db2:
-        st.markdown("### 🕸️ 关系图谱")
-        if st.button("🔄 刷新图谱"):
-            graph_data = memory.get_visual_graph_data()
-            if graph_data["nodes"]:
-                net = Network(height="400px", width="100%", bgcolor="#ffffff", font_color="black")
-                for n in graph_data["nodes"]:
-                    net.add_node(n["id"], label=n["label"], color=n["color"], group=n["group"])
-                for e in graph_data["edges"]:
-                    net.add_edge(e["from"], e["to"], label=e["label"])
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
-                    net.save_graph(tmp.name)
-                    with open(tmp.name, 'r', encoding='utf-8') as f:
-                        components.html(f.read(), height=420)
-
-# === Tab 3: 设置 (Settings) ===
-with tab_settings:
-    st.markdown("### 🛠️ 系统维护")
-    if st.button("⚠️ 重置 Narrative Focus (慎点)"):
-        # Reset logic here
-        pass
+            # Save and read
+            net.save_graph("graph.html")
+            with open("graph.html", 'r', encoding='utf-8') as f:
+                components.html(f.read(), height=520)
