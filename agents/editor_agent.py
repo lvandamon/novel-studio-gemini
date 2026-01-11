@@ -56,6 +56,10 @@ class EditorAgent:
             # 1. Title
             if "title" not in data:
                 data["title"] = f"第 {chapter_num} 章"
+
+            # 1.5 Estimated Duration (New)
+            if "estimated_duration" not in data:
+                data["estimated_duration"] = "未知"
                 
             # 2. Outline (标准化为 List[str])
             if "outline" not in data:

@@ -40,7 +40,7 @@ class SimulatorAgent:
                     "psychological_state": char_data.get("psychological_state", "平稳"),
                     "personality": char_data.get("personality", []),
                     "values": char_data.get("values", []), # 假设 schema 里以后会有
-                    "recent_trauma": char_data.get("psychological_history", [])[-1:] if char_data.get("psychological_history") else "无"
+                    "recent_trauma": char_data.get("psychological_history", [])[-3:] if char_data.get("psychological_history") else "无"
                 }
                 snapshots.append(json.dumps(snapshot, ensure_ascii=False))
             else:

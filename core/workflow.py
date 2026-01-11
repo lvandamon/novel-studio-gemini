@@ -85,7 +85,7 @@ class NovelWorkflow:
 {state.get('simulator_feedback', '无')}
 """
         
-        outline_data = self.editor.generate_outline(full_context, state["chapter_num"])
+        outline_data = self.editor.generate_outline(state["chapter_num"], full_context)
         state["outline_data"] = outline_data
         return state
 
