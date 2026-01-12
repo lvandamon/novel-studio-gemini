@@ -10,6 +10,7 @@ from agents.simulator_agent import SimulatorAgent
 from agents.writer_agent import WriterAgent
 from agents.reviewer_agent import ReviewerAgent
 from agents.archivist_agent import ArchivistAgent
+from agents.reader_agent import ReaderAgent
 
 # --- State Definition ---
 class NovelState(TypedDict):
@@ -29,6 +30,7 @@ class NovelState(TypedDict):
     simulator_retry_count: int
     review_feedback: str
     revision_count: int
+    reader_feedback: Dict[str, Any] # New: Store reader sentiment
     
     # Flags
     director_ran: bool
@@ -48,6 +50,7 @@ class NovelWorkflow:
         self.simulator = SimulatorAgent(memory)
         self.writer = WriterAgent()
         self.reviewer = ReviewerAgent(memory)
+        self.reader = ReaderAgent() # Initialize Reader
         self.archivist = ArchivistAgent(memory)
         self.foreshadowing_agent = ForeshadowingAgent(memory)
 
@@ -77,9 +80,16 @@ class NovelWorkflow:
         base_context = self.context_manager.build_director_context(state["chapter_num"])
         roster = self.memory.get_character_roster_brief()
         
-        # 2. Get Foreshadowing Suggestions
-        # 假设当前地点可能沿用上一章的，或者为空（由 Editor 决定）
-        # 这里我们只传入 chapter_num，让 Agent 检查所有伏笔
+        # 2. Extract potential characters for Causal Lookup
+        # 策略：从 Narratice Focus 的 goal 和上一章摘要中提取提到的角色
+        focus = state.get("narrative_focus", {})
+        prev_summary = self.memory.get_chapter_summary(state["chapter_num"] - 1)
+        potential_chars = self.memory._extract_entities_semantically(f"{focus.get('goal', '')} {prev_summary}")
+        
+        # 获取这些角色的因果上下文
+        causal_context = self.editor._get_causal_context(potential_chars)
+
+        # 3. Get Foreshadowing Suggestions
         hook_suggestions = self.foreshadowing_agent.suggest_callbacks(state["chapter_num"], current_location=None)
 
         full_context = f"""
@@ -95,7 +105,7 @@ class NovelWorkflow:
 {state.get('simulator_feedback', '无')}
 """
         
-        outline_data = self.editor.generate_outline(state["chapter_num"], full_context)
+        outline_data = self.editor.generate_outline(state["chapter_num"], full_context, causal_context=causal_context)
         state["outline_data"] = outline_data
         return state
 
@@ -160,6 +170,13 @@ class NovelWorkflow:
         state["revision_count"] = state.get("revision_count", 0) + 1
         return state
 
+    def node_reader_eval(self, state: NovelState) -> NovelState:
+        """Node 4.5: Reader (Sentiment Analysis)"""
+        print(f"\n👀 === Workflow: Reader Reading ===")
+        feedback = self.reader.read_chapter(state["draft_content"])
+        state["reader_feedback"] = feedback
+        return state
+
     def node_archivist_save(self, state: NovelState) -> NovelState:
         """Node 5: Archivist (Persistence)"""
         print(f"\n🗄️ === Workflow: Archiving ===")
@@ -170,7 +187,11 @@ class NovelWorkflow:
         # Archivist 虽然也提取伏笔，但 ForeshadowingAgent 更专业，且负责更新状态
         self.foreshadowing_agent.analyze_hooks(state["draft_content"], state["chapter_num"])
         
-        state["final_content"] = state["draft_content"]
+        # Append Reader Feedback to Final Content for human review
+        reader_fb = state.get("reader_feedback", {})
+        fb_str = f"\n\n--- 📊 读者反馈报告 ---\nMood: {reader_fb.get('reader_mood')}\nBoredom: {reader_fb.get('boredom_score')}\nExpectation: {reader_fb.get('expectation_score')}\nComment: {reader_fb.get('comment')}\n"
+        
+        state["final_content"] = state["draft_content"] + fb_str
         return state
 
     # --- Edge Logic ---
@@ -213,6 +234,7 @@ class NovelWorkflow:
         workflow.add_node("simulator", self.node_simulator_check)
         workflow.add_node("writer", self.node_writer_gen)
         workflow.add_node("reviewer", self.node_reviewer_check)
+        workflow.add_node("reader", self.node_reader_eval) # Add Reader Node
         workflow.add_node("archivist", self.node_archivist_save)
         
         # Add Edges
@@ -232,16 +254,17 @@ class NovelWorkflow:
         
         workflow.add_edge("writer", "reviewer")
         
-        # Conditional Edge: Reviewer -> Archivist (Pass) OR Writer (Reject)
+        # Conditional Edge: Reviewer -> Reader (Pass) OR Writer (Reject)
         workflow.add_conditional_edges(
             "reviewer",
             self.check_review_status,
             {
-                "approve": "archivist",
+                "approve": "reader", # Pass to Reader instead of Archivist
                 "reject": "writer"
             }
         )
         
+        workflow.add_edge("reader", "archivist") # Reader -> Archivist
         workflow.add_edge("archivist", END)
         
         return workflow.compile()

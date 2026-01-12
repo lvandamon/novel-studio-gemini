@@ -13,6 +13,25 @@ class EditorAgent:
         self.llm = get_deepseek_reasoner() 
         self.chain = EDITOR_GEN_OUTLINE_PROMPT | self.llm | StrOutputParser()
         self.context_manager = context_manager
+        self.memory = context_manager.memory
+
+    def _get_causal_context(self, active_characters: list) -> str:
+        """从图谱中提取关键角色的因果链背景"""
+        if not self.memory.graph.is_connected() or not active_characters:
+            return ""
+        
+        causal_report = ["### 🕸️ 因果链追溯 (Causal Context)"]
+        for char in active_characters:
+            # 1. 查询角色的社交/状态关系
+            rel_context = self.memory.graph.query_entity_context(char)
+            if "暂无" not in rel_context:
+                causal_report.append(f"【{char} 的既定关系】:\n{rel_context}")
+            
+            # 2. 尝试寻找因果链 (这里可以根据需要扩展，比如查找最近参与的重大事件)
+            # 暂时使用 entity_context 提供的关系作为基础，
+            # 也可以在这里增加特定的因果追溯逻辑。
+        
+        return "\n".join(causal_report) if len(causal_report) > 1 else ""
 
     def _clean_json(self, text: str) -> str:
         """
@@ -36,15 +55,19 @@ class EditorAgent:
             
         return text.strip()
 
-    def generate_outline(self, chapter_num: int, context_package: str) -> Dict[str, Any]:
+    def generate_outline(self, chapter_num: int, context_package: str, causal_context: str = "") -> Dict[str, Any]:
         """
         调用 R1 模型生成章节大纲，并进行格式清洗和补全。
         """
         print(f"🧠 Editor: 正在构思第 {chapter_num} 章大纲 (DeepSeek-R1)...")
         
+        full_context = context_package
+        if causal_context:
+            full_context += f"\n\n{causal_context}"
+
         try:
             raw_output = self.chain.invoke({
-                "context": context_package,
+                "context": full_context,
                 "chapter_num": chapter_num
             })
             
