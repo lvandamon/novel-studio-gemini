@@ -1,6 +1,30 @@
 import os
+import time
+import functools
 from typing import List, Dict, Any, Optional
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, exceptions
+
+def retry_neo4j(max_retries=3, initial_delay=1):
+    """Neo4j 操作的简单指数退避重试装饰器"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (exceptions.ServiceUnavailable, exceptions.SessionExpired) as e:
+                    last_exception = e
+                    print(f"⚠️ Neo4j 尝试 {i+1}/{max_retries} 失败: {e}. {delay}秒后重试...")
+                    time.sleep(delay)
+                    delay *= 2
+                    # 尝试重新连接
+                    if hasattr(args[0], "_connect"):
+                        args[0]._connect()
+            raise RuntimeError(f"❌ Neo4j 在 {max_retries} 次尝试后依然不可用: {last_exception}")
+        return wrapper
+    return decorator
 
 class GraphManager:
     def __init__(self, uri: str = None, user: str = None, password: str = None):
@@ -11,39 +35,41 @@ class GraphManager:
         self._connect()
 
     def _connect(self):
+        """建立连接，如果失败则抛出异常，不再静默处理"""
         try:
+            if self.driver:
+                self.driver.close()
             self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.driver.verify_connectivity()
-            # print("✅ Neo4j 连接成功") 
         except Exception as e:
-            # print(f"⚠️ Neo4j 连接失败: {e}. 图谱功能将不可用。")
-            self.driver = None
+            raise RuntimeError(f"❌ 无法连接到 Neo4j 数据库。200万字项目必须强制依赖图谱，请检查数据库状态: {e}")
 
     def close(self):
         if self.driver:
             self.driver.close()
 
     def is_connected(self) -> bool:
-        return self.driver is not None
+        try:
+            if self.driver:
+                self.driver.verify_connectivity()
+                return True
+        except:
+            pass
+        return False
         
     def _sanitize_label(self, label: str) -> str:
-        """Sanitize label to be safe for Cypher by wrapping in backticks"""
-        # Remove any existing backticks to avoid injection
         clean = label.replace("`", "")
         return f"`{clean}`"
 
+    @retry_neo4j()
     def update_relationship(self, source: str, source_type: str, relation: str, target: str, target_type: str, properties: Dict = None, is_negated: bool = False, chapter_num: int = 0):
         """
         全能关系管理：支持建立新关系、更新属性、以及逻辑删除关系。
         """
-        if not self.driver: return
-        
         # Sanitize Labels
         source_label = self._sanitize_label(source_type)
         target_label = self._sanitize_label(target_type)
-        # Relation types usually don't need backticks if simple, but better safe. Actually, relationship types in Cypher usually stick to simple chars. But wrapping in backticks is valid for types too.
         relation_label = f"`{relation.upper().replace('`', '')}`"
-
 
         if is_negated:
             self._logical_delete_relationship(source, relation_label, target, chapter_num)
@@ -52,10 +78,9 @@ class GraphManager:
 
     # --- 事件因果图 (Event Causality DAG) ---
 
+    @retry_neo4j()
     def add_event_node(self, event_uid: str, description: str, chapter: int, event_type: str = "Major"):
         """创建或更新事件节点"""
-        if not self.driver: return
-        
         query = """
         MERGE (e:Event {uid: $uid})
         SET e.description = $desc, 
@@ -66,10 +91,9 @@ class GraphManager:
         with self.driver.session() as session:
             session.run(query, uid=str(event_uid), desc=description, chapter=chapter, type=event_type)
 
+    @retry_neo4j()
     def add_causality(self, cause_event_uid: str, effect_event_uid: str, reason: str = ""):
         """记录因果链: (Event A) -[CAUSED]-> (Event B)"""
-        if not self.driver: return
-        
         query = """
         MATCH (a:Event {uid: $cause_uid})
         MATCH (b:Event {uid: $effect_uid})
@@ -79,12 +103,12 @@ class GraphManager:
         with self.driver.session() as session:
             session.run(query, cause_uid=str(cause_event_uid), effect_uid=str(effect_event_uid), reason=reason)
 
+    @retry_neo4j()
     def add_participation(self, character_name: str, event_uid: str, role: str):
         """记录角色参与事件: (Character) -[PARTICIPATED_IN {role: ...}]-> (Event)"""
-        if not self.driver: return
-        
         query = """
-        MATCH (c {name: $char_name})
+        MERGE (c:Character {name: $char_name})
+        WITH c
         MATCH (e:Event {uid: $event_uid})
         MERGE (c)-[r:PARTICIPATED_IN]->(e)
         SET r.role = $role
@@ -92,13 +116,11 @@ class GraphManager:
         with self.driver.session() as session:
             session.run(query, char_name=character_name, event_uid=str(event_uid), role=role)
 
+    @retry_neo4j()
     def query_causal_chain(self, event_uid: str, depth: int = 3) -> str:
         """
         反向追溯：查出导致该事件的前因后果。
-        Returns: 描述文本
         """
-        if not self.driver: return "（图谱未连接）"
-
         # 查询导致该事件的上游事件 (Ancestors)
         query = f"""
         MATCH p = (root:Event {{uid: $uid}})<-[:CAUSED*1..{depth}]-(cause:Event)
@@ -129,8 +151,6 @@ class GraphManager:
 
     def _upsert_relationship(self, source: str, source_label: str, relation_label: str, target: str, target_label: str, properties: Dict = None, chapter_num: int = 0):
         """插入或更新关系，包含 start_chapter"""
-        # Note: source_label, target_label, relation_label MUST be pre-sanitized and include backticks if needed
-        
         query = f"""
         MERGE (a:{source_label} {{name: $source_name}})
         MERGE (b:{target_label} {{name: $target_name}})
@@ -164,10 +184,9 @@ class GraphManager:
             if result.consume().counters.properties_set == 0:
                 session.run(fallback_query, params)
 
+    @retry_neo4j()
     def query_entity_context(self, entity_name: str, current_chapter: int = 999999) -> str:
         """查询在特定章节有效的实体上下文"""
-        if not self.driver: return "（图谱未连接）"
-
         query = f"""
         MATCH (a {{name: $name}})-[r]-(b)
         WHERE (r.start_chapter IS NULL OR r.start_chapter <= $current_chapter)
@@ -195,9 +214,8 @@ class GraphManager:
             
         return "\n".join(context_lines)
 
+    @retry_neo4j()
     def find_path_between(self, start: str, end: str, max_depth: int = 3) -> str:
-        if not self.driver: return ""
-
         query = f"""
         MATCH p = shortestPath((a {{name: $start}})-[*..{max_depth}]-(b {{name: $end}}))
         RETURN p
@@ -219,10 +237,8 @@ class GraphManager:
             
         return "未发现直接联系。"
 
+    @retry_neo4j()
     def get_visualization_data(self, limit: int = 100) -> Dict[str, List[Dict]]:
-        if not self.driver:
-            return {"nodes": [], "edges": []}
-            
         query = f"""
         MATCH (n)-[r]->(m)
         RETURN n.name as source, labels(n) as source_label, 

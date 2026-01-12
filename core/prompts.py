@@ -35,6 +35,28 @@ CONTEXT_INTENT_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+# --- Context Manager: Smart Compression ---
+
+CONTEXT_COMPRESSION_SYSTEM_PROMPT = """你是一个【上下文压缩引擎】。
+你的任务是将给定的文本内容压缩到目标 Token 预算以内，同时保留对叙事至关重要的核心信息。
+
+压缩准则：
+1. **保留实体**：绝不能删除人名、地名、物品名、功法名等专有名词。
+2. **保留因果**：保留 "A 导致 B" 的逻辑链条。
+3. **保留状态**：保留角色的关键状态（受伤、中毒、心理崩溃等）。
+4. **剔除废话**：删除所有的修辞、环境描写、无关的对话填充、冗余的解释。
+5. **结构化摘要**：使用紧凑的列表或短句进行重组，不需要保持原文的流畅度，只要机器可读即可。
+
+目标：将内容压缩至约 {budget} tokens。
+"""
+
+CONTEXT_COMPRESSION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", CONTEXT_COMPRESSION_SYSTEM_PROMPT),
+        ("user", "【待压缩内容】:\n{content}\n\n请进行高密度压缩。",),
+    ]
+)
+
 # --- Memory Agent (DeepSeek-V3) Prompts ---
 
 ENTITY_EXTRACTION_SYSTEM_PROMPT = """你是一个专业的【实体识别引擎】。
@@ -116,12 +138,7 @@ EDITOR_GEN_OUTLINE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", EDITOR_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【上下文信息 (Context)】：
-    {context}
-
-    请推演下一章（第 {chapter_num} 章）的详细细纲。
-    """,
+            "\n    【上下文信息 (Context)】：\n    {context}\n\n    请推演下一章（第 {chapter_num} 章）的详细细纲。\n    ",
         ),
     ]
 )
@@ -161,15 +178,7 @@ SIMULATOR_CHECK_PROMPT = ChatPromptTemplate.from_messages(
         ("system", SIMULATOR_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【角色精神轨迹 (Mental Curves)】：
-    {character_profiles}
-
-    【拟定大纲 (Proposed Outline)】：
-    {outline}
-
-    请开始心理沙盘推演。
-    """,
+            "\n    【角色精神轨迹 (Mental Curves)】：\n    {character_profiles}\n\n    【拟定大纲 (Proposed Outline)】：\n    {outline}\n\n    请开始心理沙盘推演。\n    ",
         ),
     ]
 )
@@ -213,18 +222,7 @@ WRITER_GEN_CHAPTER_PROMPT = ChatPromptTemplate.from_messages(
         ("system", WRITER_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【本章大纲】：
-    {outline}
-
-    【上下文资料包 (Context Package)】：
-    {context_package}
-
-    ⚠️ 最终确认：
-    请再次检查资料包里的【角色状态】。如果有“重伤”或“精神异常”，请务必在第一段描写中体现出来！
-    
-    请开始创作正文。
-    """,
+            "\n    【本章大纲】：\n    {outline}\n\n    【上下文资料包 (Context Package)】：\n    {context_package}\n\n    ⚠️ 最终确认：\n    请再次检查资料包里的【角色状态】。如果有“重伤”或“精神异常”，请务必在第一段描写中体现出来！\n    \n    请开始创作正文。\n    ",
         ),
     ]
 )
@@ -234,22 +232,7 @@ WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages(
         ("system", "你是一个苛刻的文学编辑。你的任务是检查草稿是否符合大纲要求且逻辑自洽。"),
         (
             "user",
-            """
-    【原始大纲】：
-    {outline}
-
-    【生成的草稿】：
-    {draft}
-
-    请进行【红线审查】：
-    1. **状态一致性**：角色是否做出了违背其【当前身体/精神状态】的动作？（例如：重伤还能乱跳，胆小鬼突然勇猛）
-    2. **物品逻辑**：是否使用了未持有的道具？
-    3. **剧情偏差**：是否严重偏离大纲？
-    4. **字数检查**：是否过短或过水？
-
-    如果一切正常，请仅输出 "PASS"。
-    如果有致命问题，请简要列出修改意见（必须具体指出哪里违背了状态）。
-    """,
+            "\n    【原始大纲】：\n    {outline}\n\n    【生成的草稿】：\n    {draft}\n\n    请进行【红线审查】：\n    1. **状态一致性**：角色是否做出了违背其【当前身体/精神状态】的动作？（例如：重伤还能乱跳，胆小鬼突然勇猛）\n    2. **物品逻辑**：是否使用了未持有的道具？\n    3. **剧情偏差**：是否严重偏离大纲？\n    4. **字数检查**：是否过短或过水？\n\n    如果一切正常，请仅输出 \"PASS\"。\n    如果有致命问题，请简要列出修改意见（必须具体指出哪里违背了状态）。\n    ",
         ),
     ]
 )
@@ -259,15 +242,7 @@ WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", "你是作家。根据编辑的意见修改草稿。",
         (
             "user",
-            """
-    【原始草稿】：
-    {draft}
-
-    【修改意见】：
-    {critique}
-
-    请重写或修改草稿以解决上述问题。直接输出修改后的正文。
-    """,
+            "\n    【原始草稿】：\n    {draft}\n\n    【修改意见】：\n    {critique}\n\n    请重写或修改草稿以解决上述问题。直接输出修改后的正文。\n    ",
         ),
     ]
 )
@@ -311,15 +286,7 @@ REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages(
         ("system", REVIEWER_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【历史设定/相关记忆】：
-    {memory_context}
-
-    【待审核内容】：
-    {content}
-
-    请开始审核。
-    """,
+            "\n    【历史设定/相关记忆】：\n    {memory_context}\n\n    【待审核内容】：\n    {content}\n\n    请开始审核。\n    ",
         ),
     ]
 )
@@ -404,14 +371,7 @@ ARCHIVIST_EXTRACT_PROMPT = ChatPromptTemplate.from_messages(
         ("system", ARCHIVIST_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【当前世界日期】：{current_date}
-
-    【正文内容】：
-    {content}
-
-    请提取数据更新并计算新日期。
-    """,
+            "\n    【当前世界日期】：{current_date}\n\n    【正文内容】：\n    {content}\n\n    请提取数据更新并计算新日期。\n    ",
         ),
     ]
 )
@@ -460,15 +420,7 @@ ARCHIVIST_VALIDATION_PROMPT = ChatPromptTemplate.from_messages(
         ("system", ARCHIVIST_VALIDATION_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【既定事实 (Established Facts)】：
-    {existing_context}
-
-    【拟定更新 (Proposed Updates)】：
-    {proposed_updates}
-
-    请进行逻辑判决。
-    """,
+            "\n    【既定事实 (Established Facts)】：\n    {existing_context}\n\n    【拟定更新 (Proposed Updates)】：\n    {proposed_updates}\n\n    请进行逻辑判决。\n    ",
         ),
     ]
 )
@@ -489,12 +441,7 @@ SUMMARIZER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", SUMMARIZER_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【章节正文】：
-    {content}
-
-    请生成摘要。
-    """,
+            "\n    【章节正文】：\n    {content}\n\n    请生成摘要。\n    ",
         ),
     ]
 )
@@ -517,12 +464,7 @@ SUMMARIZER_BATCH_PROMPT = ChatPromptTemplate.from_messages(
         ("system", SUMMARIZER_BATCH_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【待聚合的章节摘要】：
-    {summaries}
-
-    请生成阶段性综述。
-    """,
+            "\n    【待聚合的章节摘要】：\n    {summaries}\n\n    请生成阶段性综述。\n    ",
         ),
     ]
 )
@@ -565,15 +507,7 @@ FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
         ("system", FORESHADOWING_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【待回收伏笔 (Active Hooks)】：
-    {active_hooks}
-
-    【章节正文】：
-    {content}
-
-    请分析伏笔变动。
-    """,
+            "\n    【待回收伏笔 (Active Hooks)】：\n    {active_hooks}\n\n    【章节正文】：\n    {content}\n\n    请分析伏笔变动。\n    ",
         ),
     ]
 )
@@ -581,31 +515,33 @@ FORESHADOWING_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages(
 # --- Director Agent (DeepSeek-R1) Prompts ---
 
 DIRECTOR_SYSTEM_PROMPT = """你是《无限流·小说工作室》的【总导演 (Director)】。
-你不对具体的文字负责，你只对【作品的生命周期】负责。你的眼中只有结构、节奏和留存率。
+你不对具体的文字负责，你只对【作品的生命周期】和【核心母题】负责。
 
 你的核心职责是进行【宏观叙事审计】：
-1. **进度审计**：检查当前 Unit/Arc 是否严重超支（比如预计10章写完，现在已经写了15章还在铺垫）。
+1. **进度审计**：检查当前 Unit/Arc 是否严重超支。
 2. **节奏调控**：根据当前进度，强制下达“节奏指令”。
-   - 如果进度滞后，下达 "Accelerate" (加速/砍支线)。
-   - 如果进度过快，下达 "Expand" (填充细节/增加阻碍)。
-   - 如果到达节点，下达 "Climax" (高潮) 或 "Conclusion" (收尾)。
-3. **世界推演**：主角在行动时，世界并没有静止。你需要根据剧情发展，更新【世界局势】。
+3. **母题共鸣 (Thematic Resonance)**：
+   - 每一卷/单元都有一个核心母题 (Theme)，例如“背叛”、“牺牲”或“凡人的挣扎”。
+   - 你必须检查最近的剧情是否呼应了这个母题。如果已经很久没有呼应 (echo_count 低)，你必须强制插入一个【点题事件】。
+   - 不要让故事变成流水账，要有灵魂。
 
 输出格式要求：
 你必须输出一个 JSON 对象，结构如下：
 ```json
 {{
-    "analysis": "简短犀利的现状分析 (e.g. '青云门篇幅严重超支，日常水文太多，必须立刻引发宗门大比')",
+    "analysis": "简短犀利的现状分析",
     "pacing_directive": "加速/减速/高潮/收尾/正常",
+    "thematic_feedback": "对母题表现的评价 (e.g. '最近打斗太多，完全忘了本卷主题是[复仇的代价]')",
     "narrative_focus_update": {{
-        "current_beat": "新的节拍 (e.g. 危机爆发)",
+        "current_beat": "新的节拍",
         "current_goal": "修正后的短期目标",
         "current_conflict": "当前核心冲突",
-        "world_state_summary": "更新后的世界背景 (e.g. 魔道入侵前夕，气氛压抑)"
+        "current_theme": "（可选）修正或延续当前母题",
+        "world_state_summary": "更新后的世界背景"
     }},
-    "should_end_arc": boolean, // 是否建议立刻结束当前 Arc
-    "global_event": "（可选）发生的全局大事件 (e.g. 天空出现裂痕，灵气复苏)",
-    "critique": "对最近几章的毒舌批评 (指出最大的问题)"
+    "should_end_arc": boolean, 
+    "global_event": "（可选）发生的全局大事件或【点题事件】",
+    "critique": "毒舌批评"
 }}
 ```
 """
@@ -615,26 +551,7 @@ DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", DIRECTOR_SYSTEM_PROMPT),
         (
             "user",
-            """
-    【当前规划 (Plan)】：
-    Volume: {volume_name} ({volume_goal})
-    Arc: {arc_name} ({arc_goal})
-    进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)
-    预估结束章节: {end_chapter_estimated}
-
-    【叙事历史脉络 (Narrative History)】：
-    {recent_summaries}
-
-    【近期遥测数据 (Narrative Telemetry)】：
-    {telemetry_data}
-
-    【当前叙事焦点】：
-    {current_focus}
-
-    {chaos_injection}
-
-    请进行审计与决策。
-    """,
+            "\n    【当前规划 (Plan)】：\n    Volume: {volume_name} ({volume_goal})\n    Arc: {arc_name} ({arc_goal})\n    进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)\n    预估结束章节: {end_chapter_estimated}\n\n    【叙事历史脉络 (Narrative History)】：\n    {recent_summaries}\n\n    【近期遥测数据 (Narrative Telemetry)】：\n    {telemetry_data}\n\n    【当前叙事焦点】：\n    {current_focus}\n\n    {chaos_injection}\n\n    请进行审计与决策。\n    ",
         ),
     ]
 )

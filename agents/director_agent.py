@@ -178,13 +178,21 @@ class DirectorAgent:
             # 这里的逻辑是：Director 的决定具有最高优先级，覆盖当前的 Focus
             current_focus = self.memory.get_narrative_focus()
             
+            # 计算 Echo Count Delta
+            # 简单的启发式：如果 Director 认为这次点题了 (在 feedback 里表扬)，我们可以手动加分
+            # 或者干脆让 Director 在 JSON 里直接返回 delta？
+            # 现在的 Prompt 里没写返回 delta，暂时由人类或者分析 feedback 来决定太复杂
+            # 我们假设只要 global_event 涉及主题，或者 feedback 是正向的，就加 1
+            # 这里简化处理：暂不自动更新 echo count，留给后续 Reviewer 来打分更合适。
+            
             self.memory.update_narrative_focus(
-                volume=current_focus.get("volume"), # 卷名通常不轻易变
-                arc=current_focus.get("arc"),       # 单元名也不变
+                volume=current_focus.get("volume"), 
+                arc=current_focus.get("arc"),       
                 beat=focus_update.get("current_beat", current_focus.get("beat")),
                 goal=focus_update.get("current_goal", current_focus.get("goal")),
                 conflict=focus_update.get("current_conflict", current_focus.get("conflict")),
-                state=focus_update.get("world_state_summary", current_focus.get("state"))
+                state=focus_update.get("world_state_summary", current_focus.get("state")),
+                current_theme=focus_update.get("current_theme", current_focus.get("theme"))
             )
             print(f"   🎬 叙事指令已下达: {decision.get('pacing_directive')} - {focus_update.get('current_beat')}")
 
@@ -192,7 +200,7 @@ class DirectorAgent:
         global_event = decision.get("global_event")
         if global_event:
             self.memory.log_event(
-                chapter_num=0, # 0 表示系统级/世界级事件
+                chapter_num=0, 
                 character_name="WORLD",
                 event_type="GLOBAL_EVENT",
                 description=global_event,
@@ -200,6 +208,8 @@ class DirectorAgent:
             )
             print(f"   🌍 世界线变动: {global_event}")
             
-        # Log critique
+        # Log critique and thematic feedback
+        if decision.get("thematic_feedback"):
+             print(f"   🎼 母题回响: {decision.get('thematic_feedback')}")
         if decision.get("critique"):
             print(f"   📢 导演锐评: {decision.get('critique')}")

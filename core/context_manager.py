@@ -4,7 +4,7 @@ from core.memory import MemoryManager
 import json
 from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_chat
-from core.prompts import CONTEXT_INTENT_PROMPT
+from core.prompts import CONTEXT_INTENT_PROMPT, CONTEXT_COMPRESSION_PROMPT
 import re
 
 class ContextManager:
@@ -39,15 +39,16 @@ class ContextManager:
             "vocabulary": 1000,
         }
         
-        # 初始化意图分类链
-        self.llm = get_deepseek_chat(temperature=0.1) # 意图分析需要冷静、准确
+        # 初始化 LLM 链
+        self.llm = get_deepseek_chat(temperature=0.1) 
         self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
+        self.compressor_chain = CONTEXT_COMPRESSION_PROMPT | self.llm | StrOutputParser()
 
     def _count_tokens(self, text: str) -> int:
         return len(self.encoder.encode(text))
 
     def _trim_lines_to_budget(self, text: str, budget: int, from_start: bool = True) -> str:
-        """按行裁剪文本以适应 token 预算"""
+        """按行裁剪文本以适应 token 预算 (Physical Fallback)"""
         if not text: return ""
         lines = text.split('\n')
         result = []
@@ -66,6 +67,40 @@ class ContextManager:
             result.reverse()
             
         return "\n".join(result)
+
+    def _smart_fit(self, content: str, budget: int) -> str:
+        """
+        智能适配预算 (Smart Compression Strategy)
+        1. 计算当前 token 数。
+        2. 如果超标，调用 LLM 进行语义压缩 (Semantic Compression)。
+        3. 如果压缩后依然超标 (罕见)，执行物理裁剪 (Physical Trimming) 作为兜底。
+        """
+        current_usage = self._count_tokens(content)
+        if current_usage <= budget:
+            return content
+            
+        print(f"   🤏 Context Overflow ({current_usage} > {budget}). Triggering Semantic Compression...")
+        
+        try:
+            # 尝试压缩
+            compressed_content = self.compressor_chain.invoke({
+                "content": content,
+                "budget": budget
+            })
+            
+            new_usage = self._count_tokens(compressed_content)
+            print(f"   -> Compressed to {new_usage} tokens.")
+            
+            # 如果依然超标，进行物理裁剪
+            if new_usage > budget:
+                print("   ⚠️ Compression insufficient. Applying physical trim fallback.")
+                return self._trim_lines_to_budget(compressed_content, budget)
+                
+            return compressed_content
+            
+        except Exception as e:
+            print(f"   ⚠️ Compression Failed: {e}. Fallback to trim.")
+            return self._trim_lines_to_budget(content, budget)
 
     def _build_vocabulary_constraints(self, volume_name: str, arc_name: str) -> str:
         """
@@ -194,13 +229,12 @@ class ContextManager:
 
     def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None) -> str:
         """
-        重构后的 Writer 上下文构建：意图驱动型检索
+        重构后的 Writer 上下文构建：意图驱动型检索 + 智能压缩
         """
         # 0. 意图分析
         intent = self._analyze_plot_intent(outline)
         
-        # --- 1. World Bible (绝对真理层) ---
-        # 检索逻辑升级：根据 intent['needs_world_rules'] 决定是否深度检索设定
+        # --- 1. World Bible (绝对真理层 - 不可压缩) ---
         bible_query = f"{scene_location}"
         if intent.get('needs_world_rules') or intent.get('needs_skills'):
              bible_query += f" {outline[:100]} 功法 境界 规则"
@@ -211,19 +245,16 @@ class ContextManager:
         
         current_budget = self.total_budget - self._count_tokens(bible_text)
 
-        # --- 2. Story State (状态层) ---
-        # 这一层不检索，直接从数据库取结构化数据
+        # --- 2. Story State (状态层 - 必须保留，但可轻度压缩) ---
         focus = self.memory.get_narrative_focus()
         active_plan = self.memory.get_active_plan()
         prev_summary = self.memory.get_chapter_summary(chapter_num - 1)
         
-        # 动态词表
         vocab_text = self._build_vocabulary_constraints(
             active_plan.get('volume', {}).get('name', '默认'),
             active_plan.get('arc', {}).get('name', '默认')
         )
 
-        # 强制获取活跃伏笔 (不再靠 RAG 碰运气)
         active_hooks = ""
         if intent["needs_hooks"] or intent["type"] == "Investigation":
             hooks = self.memory.get_active_foreshadowing()
@@ -240,33 +271,31 @@ class ContextManager:
 # 📜 前情提要
 【上一章回顾】: {prev_summary}
 """
-
-        # --- 3. Targeted Retrieval (定向检索层) ---
-        # 根据意图分配预算和检索词
-        used_tokens = self._count_tokens(state_text)
-        retrieval_budget = current_budget - used_tokens
         
-        # A. 角色状态 (Mental Ledger & Status)
-        # 不再只搜背景，要搜“当前的伤势、心情、持有的道具”
+        # 计算剩余预算
+        used_tokens = self._count_tokens(state_text) + self._count_tokens(vocab_text)
+        retrieval_budget = current_budget - used_tokens
+        # 确保至少有 2000 tokens 给检索，否则报错或强行分配
+        if retrieval_budget < 2000:
+             retrieval_budget = 2000 
+
+        # --- 3. Targeted Retrieval (定向检索层 - 智能压缩区) ---
+        
+        # A. 角色状态
         char_info = "# 👥 角色实时状态\n"
         for char_name in active_characters:
-            # 这里的 get_character_details 需要返回结构化的状态栏而非仅仅是简介
-            # 传递 intent 给 character details 可能需要修改 memory 接口，这里先简化，把大纲传进去
             details = self.memory.get_character_details([char_name], query=outline)
             char_info += f"## {char_name}\n{details}\n"
         
-        # B. 关系深度检索 (Graph RAG)
+        # B. 关系深度检索
         graph_info = ""
         if intent["needs_relations"] or intent["type"] == "Social":
             graph_info = "# 🕸️ 社交深度连接\n"
             for char_name in active_characters:
-                # 获取 2 度以内的重要关系路径
                 graph_info += self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
         
-        # C. 历史记忆碎片 (Dynamic RAG)
-        # 检索策略改进：完全基于 Intent 构建 Query
+        # C. 历史记忆碎片
         rag_query = f"{ ' '.join(active_characters)} "
-        
         if intent["type"] == "Combat":
             rag_query += f"战斗 招式 伤痕 弱点 {outline[:50]}"
         elif intent["type"] == "Social":
@@ -278,17 +307,19 @@ class ContextManager:
         else:
             rag_query += outline
 
-        # 如果明确需要历史背景
         if intent.get("needs_history"):
             rag_query += " 往事 历史"
 
-        rag_content = self.memory.query_related_context(rag_query, k=12 if intent["needs_history"] else 8)
+        # 动态增加 k 值，获取更多原始素材供压缩
+        rag_content = self.memory.query_related_context(rag_query, k=15 if intent["needs_history"] else 10)
         
-        # --- 4. Assembly & Trimming ---
-        retrieval_text = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片 (基于意图:{intent['type']})\n{rag_content}"
-        retrieval_trimmed = self._trim_lines_to_budget(retrieval_text, retrieval_budget)
+        # --- 4. Smart Fit (智能适配) ---
+        retrieval_text_raw = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片 (基于意图:{intent['type']})\n{rag_content}"
+        
+        # 调用智能压缩
+        retrieval_optimized = self._smart_fit(retrieval_text_raw, retrieval_budget)
 
-        # 获取文风样板 (Mapped from Intent)
+        # 获取文风样板
         style_map = {
             "Combat": ["Action", "Scenery"],
             "Social": ["Dialogue", "InnerMonologue"],
@@ -300,7 +331,7 @@ class ContextManager:
         target_styles = style_map.get(intent["type"], ["Scenery"])
         style_text = self.memory.get_style_examples(tags=target_styles)
 
-        # 格式化氛围要求
+        # 格式化氛围
         atmosphere_text = ""
         if atmosphere:
             atmosphere_text = f"""
@@ -311,4 +342,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_trimmed}"
+        return f"{bible_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"

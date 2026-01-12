@@ -124,12 +124,22 @@ class MemoryManager:
                 current_beat TEXT,
                 current_goal TEXT,
                 current_conflict TEXT,
+                current_theme TEXT DEFAULT '成长', -- 新增：当前卷/单元的核心母题
+                thematic_echo_count INTEGER DEFAULT 0, -- 新增：母题回响计数
                 world_state_summary TEXT,
                 chapters_since_last_beat INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 current_date TEXT DEFAULT '天道历元年1月1日'
             )
         ''')
+        
+        # 自动迁移：检查是否存在新字段，不存在则添加 (Simple Migration)
+        try:
+            cursor.execute('ALTER TABLE narrative_focus ADD COLUMN current_theme TEXT DEFAULT "成长"')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE narrative_focus ADD COLUMN thematic_echo_count INTEGER DEFAULT 0')
+        except: pass
 
         # 卷管理表
         cursor.execute('''
@@ -844,7 +854,7 @@ class MemoryManager:
         conn.close()
         return row[0] if row and row[0] else "暂无摘要。"
 
-    def update_narrative_focus(self, volume: str, arc: str, beat: str, goal: str, conflict: str, state: str, reset_beat: bool = False, current_date: str = None):
+    def update_narrative_focus(self, volume: str, arc: str, beat: str, goal: str, conflict: str, state: str, reset_beat: bool = False, current_date: str = None, current_theme: str = None, echo_count_delta: int = 0):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -861,28 +871,49 @@ class MemoryManager:
         if reset_beat:
             update_parts.append("chapters_since_last_beat = 0")
         
+        val_date = None
         if current_date:
             update_parts.append("current_date = excluded.current_date")
             val_date = current_date
-        else:
-            val_date = None
+
+        if current_theme:
+            update_parts.append("current_theme = excluded.current_theme")
+            
+        # 增量更新 echo_count
+        if echo_count_delta != 0:
+            # 注意：SQLite UPSERT 的 excluded 引用的是 INSERT 语句中的值。
+            # 对于增量更新，我们需要在 DO UPDATE SET 中直接操作字段。
+            # 但为了简化 UPSERT 逻辑，我们这里采取一种折中方案：
+            # 如果是 UPSERT 触发 UPDATE，则执行特殊的增量逻辑
+            # 由于 SQL 语法的限制，在单条语句中混合全量替换和增量更新比较麻烦。
+            # 简单起见，我们分两步：先执行标准的 UPSERT，再执行增量更新。
+            pass 
 
         set_clause = ", ".join(update_parts)
         
-        if current_date:
-             cursor.execute(f'''
-                INSERT INTO narrative_focus (id, current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(id) DO UPDATE SET
-                    {set_clause}
-            ''', (volume, arc, beat, goal, conflict, state, val_date))
-        else:
-             cursor.execute(f'''
-                INSERT INTO narrative_focus (id, current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-                ON CONFLICT(id) DO UPDATE SET
-                    {set_clause}
-            ''', (volume, arc, beat, goal, conflict, state))
+        # 构建 INSERT 的参数
+        # 默认值
+        def_theme = current_theme if current_theme else "成长"
+        
+        # 基础 UPSERT
+        insert_sql = '''
+            INSERT INTO narrative_focus (id, current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, thematic_echo_count, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                {set_clause}
+        '''
+        
+        # 参数准备
+        params = [volume, arc, beat, goal, conflict, state, val_date, def_theme]
+        
+        # 渲染 set_clause
+        final_sql = insert_sql.format(set_clause=set_clause)
+        
+        cursor.execute(final_sql, params)
+        
+        # 独立执行 Echo Count 的增量更新
+        if echo_count_delta != 0:
+            cursor.execute('UPDATE narrative_focus SET thematic_echo_count = thematic_echo_count + ? WHERE id = 1', (echo_count_delta,))
 
         conn.commit()
         conn.close()
@@ -902,7 +933,7 @@ class MemoryManager:
     def get_narrative_focus(self) -> Dict[str, Any]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date FROM narrative_focus WHERE id = 1')
+        cursor.execute('SELECT current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, thematic_echo_count FROM narrative_focus WHERE id = 1')
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -914,13 +945,17 @@ class MemoryManager:
                 "conflict": row[4], 
                 "state": row[5], 
                 "chapters_since_last_beat": row[6],
-                "date": row[7]
+                "date": row[7],
+                "theme": row[8] if len(row) > 8 else "成长",
+                "echo_count": row[9] if len(row) > 9 else 0
             }
         return {
             "volume": "序章", "arc": "引导篇", "beat": "背景铺垫", "goal": "确立主角身份", 
             "conflict": "生存危机", "state": "一切尚未开始。", 
             "chapters_since_last_beat": 0,
-            "date": "天道历元年1月1日"
+            "date": "天道历元年1月1日",
+            "theme": "生存",
+            "echo_count": 0
         }
 
     # --- 分级摘要管理 (Fractal Summaries) ---
