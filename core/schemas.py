@@ -52,6 +52,7 @@ class CharacterSchema(BaseModel):
     mental_ledger: List[MentalStateEntry] = Field(default_factory=list) # 精神体检账本 (Mental State Ledger)
     relationships: Dict[str, str] = Field(default_factory=dict)
     inventory: List[str] = Field(default_factory=list)
+    gold: int = Field(default=0, description="角色持有的金币数量")
     goals: List[str] = Field(default_factory=list)
     current_state: str = "正常"
     location: str = "未知" 

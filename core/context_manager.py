@@ -1,6 +1,7 @@
 import tiktoken
 from typing import List, Dict, Any, Optional
 from core.memory import MemoryManager
+from core.physics import PhysicalityEngine
 import json
 from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_chat
@@ -23,6 +24,7 @@ class ContextManager:
     
     def __init__(self, memory_manager: MemoryManager, model_name: str = "gpt-4o"):
         self.memory = memory_manager
+        self.physics_engine = PhysicalityEngine(self.memory)
         try:
             self.encoder = tiktoken.encoding_for_model(model_name)
         except:
@@ -243,7 +245,10 @@ class ContextManager:
              
         bible_text = self.memory.get_bible_context(query=bible_query, active_entities=active_characters)
         
-        current_budget = self.total_budget - self._count_tokens(bible_text)
+        # --- 1.5. Physicality Engine (物理法则层 - 不可压缩) ---
+        physics_text = self.physics_engine.get_hard_constraints_for_prompt(active_characters, scene_location)
+        
+        current_budget = self.total_budget - self._count_tokens(bible_text) - self._count_tokens(physics_text)
 
         # --- 2. Story State (状态层 - 必须保留，但可轻度压缩) ---
         focus = self.memory.get_narrative_focus()
@@ -311,7 +316,7 @@ class ContextManager:
             rag_query += " 往事 历史"
 
         # 动态增加 k 值，获取更多原始素材供压缩
-        rag_content = self.memory.query_related_context(rag_query, k=15 if intent["needs_history"] else 10)
+        rag_content = self.memory.query_related_context(rag_query, k=15 if intent["needs_history"] else 10, current_chapter=chapter_num)
         
         # --- 4. Smart Fit (智能适配) ---
         retrieval_text_raw = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片 (基于意图:{intent['type']})\n{rag_content}"
@@ -342,4 +347,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"
+        return f"{bible_text}\n{physics_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"

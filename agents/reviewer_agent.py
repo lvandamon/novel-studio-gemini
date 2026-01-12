@@ -37,9 +37,12 @@ class ReviewerAgent:
             active_characters = [name for name in all_chars if name in content]
         
         # 2. 获取上下文资料
+        focus = self.memory.get_narrative_focus()
+        current_theme = focus.get("theme", "成长")
+        
         bible_context = self.memory.get_bible_context(query=content[:500], active_entities=active_characters)
         hard_logic_snapshot = self.memory.get_hard_logic_snapshot(active_characters)
-        memory_context = self.memory.query_related_context(content[:500], k=5)
+        memory_context = self.memory.query_related_context(content[:500], k=5, current_chapter=chapter_num)
 
         try:
             full_context = f"""
@@ -52,6 +55,7 @@ class ReviewerAgent:
 {memory_context}
 """
             response = self.chain.invoke({
+                "current_theme": current_theme,
                 "memory_context": full_context,
                 "content": content
             })
@@ -66,10 +70,26 @@ class ReviewerAgent:
             
             self.memory.log_chapter_metrics(chapter_num, metrics)
             
+            # 5. 更新母题回响计数 (文眼政委核心逻辑)
+            thematic_score = metrics.get("thematic_score", 0)
+            if thematic_score >= 70:
+                print(f"   ✨ Reviewer: 检测到母题回响! (Score: {thematic_score})")
+                self.memory.update_narrative_focus(
+                    volume=focus['volume'], 
+                    arc=focus['arc'], 
+                    beat=focus['beat'], 
+                    goal=focus['goal'], 
+                    conflict=focus['conflict'], 
+                    state=focus['state'],
+                    echo_count_delta=1
+                )
+            elif thematic_score < 40:
+                print(f"   ⚠️ Reviewer: 警告，本章灵魂缺失，母题共鸣极低。")
+
             status = result_data.get("status", "PASS")
             
             if status == "PASS":
-                print(f"   ✅ Reviewer: 审核通过 (Score: {metrics.get('plot_logic_score')})")
+                print(f"   ✅ Reviewer: 审核通过 (Logic: {metrics.get('plot_logic_score')}, Theme: {thematic_score})")
                 return "PASS"
             else:
                 suggestion = result_data.get("suggestion", "请修改逻辑漏洞。")

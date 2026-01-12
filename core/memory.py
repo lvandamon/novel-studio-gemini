@@ -1239,22 +1239,62 @@ class MemoryManager:
             print(f"⚠️ Entity Extraction Failed: {e}")
             return []
 
-    def query_related_context(self, query: str, k: int = 5) -> str:
+    def query_related_context(self, query: str, k: int = 5, current_chapter: int = None) -> str:
         """
-        分级混合检索 (Tri-Stage Retrieval):
+        分级混合检索 (Tri-Stage Retrieval) with Time-Decay:
         1. 语义检索 (Semantic Search): 查找相关情节。
         2. 实体/伏笔锚点 (Entity/Hook Anchor): 强制召回相关未回收伏笔。
         3. 时空临近 (Temporal Proximity): 隐含在语义检索结果中，通过 Re-ranking 提升近期记忆权重。
         """
         final_docs = {} # id -> Document
         
-        # --- Stage 1: 宽泛的语义检索 ---
-        semantic_docs = self.vector_store.similarity_search(query, k=k)
-        for doc in semantic_docs:
-            # 假设 page_content 是唯一的 key，或者用 metadata 里的 source + index
-            key = doc.page_content[:50] 
+        # --- Stage 1: 宽泛的语义检索 (With Decay) ---
+        # Fetch more candidates to allow re-ranking (扩充候选池)
+        candidate_k = k * 3
+        
+        # Use relevance scores (0 to 1)
+        # Note: Chroma's score is distance by default, but this langchain wrapper 
+        # usually normalizes or we use relevance_scores method if supported.
+        # Fallback to similarity_search if relevance not available, but usually it is.
+        try:
+            semantic_results = self.vector_store.similarity_search_with_relevance_scores(query, k=candidate_k)
+        except Exception:
+            # Fallback for older langchain versions or if scoring fails
+            results = self.vector_store.similarity_search(query, k=candidate_k)
+            semantic_results = [(doc, 0.8) for doc in results] # Dummy score
+
+        for doc, score in semantic_results:
+            # Calculate Time Decay
+            decay_factor = 1.0
+            if current_chapter is not None and "chapter" in doc.metadata:
+                try:
+                    event_chapter = int(doc.metadata["chapter"])
+                    # 豁免规则: World Bible / Settings 不衰减
+                    doc_type = doc.metadata.get("type", "")
+                    if doc_type in ["bible_truth", "rule", "world_setting"]:
+                        decay_factor = 1.0
+                    else:
+                        delta = max(0, current_chapter - event_chapter)
+                        # Formula: (1 / (delta + 1)) ^ 0.25
+                        # Delta 10 -> 0.56, Delta 100 -> 0.31
+                        alpha = 0.25
+                        decay_factor = (1 / (delta + 1)) ** alpha
+                except:
+                    decay_factor = 1.0
+            
+            # Apply Decay
+            final_score = score * decay_factor
+            
+            # Store with updated score
+            # 使用内容前缀作为去重 Key (简单有效)
+            key = doc.page_content[:50]
             doc.metadata["retrieval_source"] = "Semantic"
-            final_docs[key] = doc
+            doc.metadata["final_score"] = final_score
+            doc.metadata["original_score"] = score
+            
+            # Keep if better
+            if key not in final_docs or final_docs[key].metadata["final_score"] < final_score:
+                final_docs[key] = doc
 
         # --- Stage 2: 实体与伏笔关联检索 ---
         # 使用语义实体提取，而非正则匹配
@@ -1264,25 +1304,32 @@ class MemoryManager:
             active_hooks = self.get_active_foreshadowing()
             for hook in active_hooks:
                 # 如果伏笔内容包含当前 query 中的关键词
-                # 这里的匹配逻辑也可以升级，但目前保留简单的包含匹配，因为 keywords 已经是精准实体了
                 for kw in keywords:
                     if kw in hook['content']:
                         # 构造一个虚拟 Document
                         doc = Document(
                             page_content=f"【未回收伏笔】(ID:{hook['id']}) {hook['content']}",
-                            metadata={"chapter": hook['chapter'], "type": "foreshadowing", "retrieval_source": "HookMatch"}
+                            metadata={
+                                "chapter": hook['chapter'], 
+                                "type": "foreshadowing", 
+                                "retrieval_source": "HookMatch",
+                                "final_score": 2.0 # Give it super high score
+                            }
                         )
                         final_docs[f"hook_{hook['id']}"] = doc
         
         # --- Stage 3: 结果整合与格式化 ---
-        # 简单的重排序逻辑：优先展示 HookMatch，然后是 Semantic
+        # Sort by final_score
         sorted_docs = sorted(
             final_docs.values(), 
             key=lambda x: (
                 0 if x.metadata.get("retrieval_source") == "HookMatch" else 1,
-                -x.metadata.get("chapter", 0) # 同优先级下，越新越好
+                -x.metadata.get("final_score", 0)
             )
         )
+        
+        # Trim to original k
+        sorted_docs = sorted_docs[:k]
 
         if not sorted_docs: return "暂无相关记忆。"
 
@@ -1290,6 +1337,7 @@ class MemoryManager:
         for i, doc in enumerate(sorted_docs):
             source_tag = "⚡️" if doc.metadata.get("retrieval_source") == "Semantic" else "🔗"
             chapter = doc.metadata.get("chapter", "?")
+            # debug_score = f"(S:{doc.metadata.get('final_score', 0):.2f})"
             lines.append(f"--- 记忆片段 {i+1} [{source_tag} 第 {chapter} 章] ---\n{doc.page_content}\n")
             
         return "\n".join(lines)
