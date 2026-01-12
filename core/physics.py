@@ -64,58 +64,37 @@ class PhysicalityEngine:
             }
         }
 
-    def get_travel_time(self, origin: str, destination: str) -> Optional[int]:
+    def get_travel_options(self, origin: str, destination: str) -> Dict[str, str]:
         """
-        查询两地之间的旅行时间（天数）。
-        这是单向的，如果需要双向，请确保在地图中定义。
+        获取两地之间的多种旅行方案。
+        返回格式: {"Walk": "30天 (无消耗)", "Fly": "6天 (需筑基期)", "Teleport": "瞬达 (需100灵石)"}
         """
-        if origin in self.world_map and destination in self.world_map[origin]:
-            return self.world_map[origin][destination]
-        # 尝试反向查询
-        if destination in self.world_map and origin in self.world_map[destination]:
-            return self.world_map[destination][origin]
-        return None
-
-    def advance_world_date(self, days_to_add: int) -> str:
-        """
-        推进世界日期，并持久化。
-        """
-        focus = self.memory.get_narrative_focus()
-        current_date_str = focus.get("date", "天道历元年1月1日")
+        base_days = None
         
-        # 使用标准库进行日期计算，假设每月30天，每年12个月
-        # 注意：这里简化了历法，复杂的自定义历法需要更强的解析器
-        try:
-            # 这是一个简化的方法，不完全精确但能用
-            parsed_date = parse_custom_date(current_date_str)
-            if not parsed_date:
-                # 如果解析失败，返回错误或默认值
-                print(f"⚠️无法解析日期: {current_date_str}")
-                return current_date_str
-
-            year, month, day = parsed_date
+        # 查找基础时间
+        if origin in self.world_map and destination in self.world_map[origin]:
+            base_days = self.world_map[origin][destination]
+        elif destination in self.world_map and origin in self.world_map[destination]:
+            base_days = self.world_map[destination][origin]
             
-            # 粗略计算
-            day += days_to_add
-            
-            while day > 30:
-                day -= 30
-                month += 1
-            
-            while month > 12:
-                month -= 12
-                year += 1
-                
-            new_date_str = format_custom_date(year, month, day)
+        if base_days is None:
+            return {}
 
-        except Exception as e:
-            print(f"Error in date calculation: {e}")
-            # 简单回退：直接在字符串上操作（不推荐）
-            new_date_str = f"{current_date_str} (推进 {days_to_add} 天)"
-
-        # 更新数据库
-        self.memory.update_world_date(new_date_str)
-        return new_date_str
+        options = {}
+        
+        # 1. 步行 (Base)
+        options["步行 (Walk)"] = f"{base_days} 天 (无消耗)"
+        
+        # 2. 御剑/飞行 (Fly) - 假设 5x 速度
+        fly_days = max(1, base_days // 5)
+        options["御剑/飞行 (Fly)"] = f"{fly_days} 天 (条件: 境界>=筑基 或 飞行法宝)"
+        
+        # 3. 传送 (Teleport) - 瞬达
+        # 只有大城市才有传送阵 (这里简单判定：只要基础距离 > 10天，假设有传送需求)
+        if base_days >= 10:
+             options["传送阵 (Teleport)"] = "即刻到达 (消耗: 100 金币/灵石)"
+             
+        return options
 
     def get_hard_constraints_for_prompt(self, character_names: List[str], current_location: str) -> str:
         """
@@ -134,14 +113,25 @@ class PhysicalityEngine:
             if char_data:
                 gold = char_data.get("gold", 0)
                 inventory = ", ".join(char_data.get("inventory", [])) or "空"
-                lines.append(f"- {name}: [金币: {gold}] [物品: {inventory}]")
+                level = char_data.get("level", "凡人")
+                lines.append(f"- {name}: [境界: {level}] [金币: {gold}] [物品: {inventory}]")
         
-        # 3. 旅行时间
-        lines.append("\n## 旅行时间 (从当前位置出发)")
+        # 3. 旅行方案
+        lines.append("\n## 可选旅行方案 (从当前位置出发)")
+        lines.append("作者可根据剧情需要选择以下任一方式，但必须在文中体现对应的代价/条件：")
+        
+        found_routes = False
         if current_location in self.world_map:
-            for dest, time in self.world_map[current_location].items():
-                lines.append(f"- {current_location} -> {dest}: {time} 天")
-        else:
-            lines.append(f"- {current_location} (未知地点，无精确旅行时间)")
-            
+            for dest in self.world_map[current_location].keys():
+                opts = self.get_travel_options(current_location, dest)
+                if opts:
+                    found_routes = True
+                    lines.append(f"   > 去往【{dest}】:")
+                    for mode, desc in opts.items():
+                        lines.append(f"     - {mode}: {desc}")
+        
+        if not found_routes:
+             # 尝试反向查找作为补充提示
+             lines.append(f"- {current_location} (当前无明确外连道路，请参考世界地图或自由发挥，但需遵循逻辑)")
+
         return "\n".join(lines)
