@@ -44,6 +44,17 @@ class ReviewerAgent:
         hard_logic_snapshot = self.memory.get_hard_logic_snapshot(active_characters)
         memory_context = self.memory.query_related_context(content[:500], k=5, current_chapter=chapter_num)
 
+        # New: Fetch Personality & Mental Context for OOC Check
+        anchors_text = ""
+        mental_text = self.memory.get_character_mental_curve(active_characters, limit=3)
+        
+        for char in active_characters:
+            anchors = self.memory.get_character_anchors(char)
+            if anchors:
+                anchors_text += f"{anchors}\n"
+
+        if not anchors_text: anchors_text = "（无活跃角色的特殊黄金锚点）"
+
         try:
             full_context = f"""
 {bible_context}
@@ -56,6 +67,8 @@ class ReviewerAgent:
 """
             response = self.chain.invoke({
                 "current_theme": current_theme,
+                "character_anchors": anchors_text,
+                "mental_states": mental_text,
                 "memory_context": full_context,
                 "content": content
             })

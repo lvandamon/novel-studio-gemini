@@ -104,13 +104,26 @@ class ArchivistAgent:
 
         # 2. 批量获取既定事实 (Batch fetch established context)
         context_snippets = []
-        # 我们只验证在 Graph 中已存在的实体，新实体由 Reviewer 负责合理性检查
-        # 这里只做“防冲突”检查
+        
+        # A. World Bible Check (设定/规则)
+        query_text = extraction.summary 
+        # 将涉及的实体列表转换
+        entity_list = list(entities_to_check)
+        bible_ctx = self.memory.get_bible_context(query=query_text, active_entities=entity_list)
+        if bible_ctx:
+             context_snippets.append(bible_ctx)
+
+        # B. Hard Logic Check (当前状态: 等级/物品/位置)
+        char_ctx = self.memory.get_hard_logic_snapshot(entity_list)
+        if char_ctx and "无有效硬逻辑数据" not in char_ctx:
+             context_snippets.append(f"--- 角色当前状态 (Hard Logic Snapshot) ---\n{char_ctx}")
+             
+        # C. Graph History (人际关系/历史事件)
         for entity in entities_to_check:
             ctx = self.memory.graph.query_entity_context(entity, current_chapter=chapter_num)
             # 过滤掉无效返回
             if ctx and "暂无" not in ctx and "未连接" not in ctx and "未发现" not in ctx:
-                context_snippets.append(f"--- 实体: {entity} 的历史记录 ---\n{ctx}")
+                context_snippets.append(f"--- 实体: {entity} 的历史记录 (Graph) ---\n{ctx}")
 
         if not context_snippets:
             # print("   ℹ️ 暂无相关历史记录，跳过逻辑冲突验证。")

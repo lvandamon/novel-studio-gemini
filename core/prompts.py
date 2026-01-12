@@ -239,7 +239,7 @@ WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages(
 
 WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", "你是作家。根据编辑的意见修改草稿。",
+        ("system", "你是作家。根据编辑的意见修改草稿。"),
         (
             "user",
             "\n    【原始草稿】：\n    {draft}\n\n    【修改意见】：\n    {critique}\n\n    请重写或修改草稿以解决上述问题。直接输出修改后的正文。\n    ",
@@ -261,14 +261,16 @@ REVIEWER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的毒舌书�
    - **位置冲突**：角色不可能同时出现在两个地方。
    - **物品归属**：角色使用了他并未持有的物品。
    - **境界压制**：低境界角色轻易击败高境界角色。
-3. **人设一致性**：主角的性格是否突然改变？（除非有剧情铺垫）
+3. **人设/心理一致性 (OOC CHECK)**：参考【黄金锚点】和【心理状态】：
+   - **黄金锚点**：角色的核心动机、誓言、创伤是不可违背的铁律。
+   - **心理惯性**：角色的行为必须符合其当前的心理状态（例如：如果处于“恐惧”状态，就不应表现得毫无理由的“勇猛”）。
 4. **情节合理性**：反派是否强行降智？主角是否无理由获得外挂？
 
 输出格式要求：
 你必须输出一个 JSON 对象（严禁包含 Markdown 标记），包含详细的评分和评论：
 ```json
 {{
-    "status": "PASS" | "BLOCK", // 只有存在严重逻辑漏洞时才 BLOCK
+    "status": "PASS" | "BLOCK", // 只有存在严重逻辑漏洞或 OOC 时才 BLOCK
     "metrics": {{
         "tension": 0-100,       // 剧情紧张度 (0:日常, 100:生死关头)
         "tone_darkness": 0-100, // 氛围压抑度 (0:欢快, 100:绝望/恐怖)
@@ -288,7 +290,7 @@ REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages(
         ("system", REVIEWER_SYSTEM_PROMPT),
         (
             "user",
-            "\n    【核心母题 (Current Theme)】：\n    {current_theme}\n\n    【历史设定/相关记忆】：\n    {memory_context}\n\n    【待审核内容】：\n    {content}\n\n    请开始审核。\n    ",
+            "\n    【核心母题 (Current Theme)】：\n    {current_theme}\n\n    【角色核心人设 (Anchors & Mental)】：\n    {character_anchors}\n    {mental_states}\n\n    【历史设定/相关记忆】：\n    {memory_context}\n\n    【待审核内容】：\n    {content}\n\n    请开始审核。\n    ",
         ),
     ]
 )

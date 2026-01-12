@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from core.memory import MemoryManager
 from datetime import datetime, timedelta
 
@@ -37,62 +37,39 @@ class PhysicalityEngine:
     def __init__(self, memory_manager: MemoryManager):
         self.memory = memory_manager
         
-        # 世界地图 (邻接表): {起点: {终点: 天数}}
-        # 这是“绝对真理”，LLM 必须遵守
-        self.world_map: Dict[str, Dict[str, int]] = {
-            "新手村": {
-                "青木城": 3,
-                "黑石矿洞": 1
-            },
-            "青木城": {
-                "新手村": 3,
-                "天风城": 10,
-                "云顶天宫": 30, # 飞行/传送
-                "无尽之海港口": 15
-            },
-            "天风城": {
-                "青木城": 10,
-                "帝都": 25
-            },
-            "帝都": {
-                "天风城": 25,
-                "云顶天宫": 15
-            },
-            "云顶天宫": {
-                 "帝都": 15,
-                 "青木城": 30
-            }
-        }
+        # 移除硬编码地图，改为从 memory (SQLite) 读取
+        # self.world_map = ... (Removed)
 
     def get_travel_options(self, origin: str, destination: str) -> Dict[str, str]:
         """
         获取两地之间的多种旅行方案。
-        返回格式: {"Walk": "30天 (无消耗)", "Fly": "6天 (需筑基期)", "Teleport": "瞬达 (需100灵石)"}
+        查询 SQL routes 表。
         """
-        base_days = None
+        # 1. 尝试直接查找直达路线
+        # 由于我们存储是有向图，但 `add_route` 并没有自动双向（我们在 init 里手动加了双向）
+        # 所以直接查询 origin -> destination
         
-        # 查找基础时间
-        if origin in self.world_map and destination in self.world_map[origin]:
-            base_days = self.world_map[origin][destination]
-        elif destination in self.world_map and origin in self.world_map[destination]:
-            base_days = self.world_map[destination][origin]
-            
-        if base_days is None:
+        routes = self.memory.get_outbound_routes(origin)
+        target_route = next((r for r in routes if r["target"] == destination), None)
+        
+        if not target_route:
+            # 暂时不支持多跳路径规划 (Multi-hop pathfinding)
+            # 如果需要，这里可以接入 Dijkstra 或 BFS，但目前仅返回 "无直达路线"
             return {}
 
+        base_days = target_route["days"]
+        methods_raw = target_route["methods"] # dict like {"Walk": "desc", ...}
+        reqs = target_route["requirements"]
+        
         options = {}
         
-        # 1. 步行 (Base)
-        options["步行 (Walk)"] = f"{base_days} 天 (无消耗)"
-        
-        # 2. 御剑/飞行 (Fly) - 假设 5x 速度
-        fly_days = max(1, base_days // 5)
-        options["御剑/飞行 (Fly)"] = f"{fly_days} 天 (条件: 境界>=筑基 或 飞行法宝)"
-        
-        # 3. 传送 (Teleport) - 瞬达
-        # 只有大城市才有传送阵 (这里简单判定：只要基础距离 > 10天，假设有传送需求)
-        if base_days >= 10:
-             options["传送阵 (Teleport)"] = "即刻到达 (消耗: 100 金币/灵石)"
+        # 格式化输出
+        for mode, desc in methods_raw.items():
+            cost_str = f"{desc}"
+            # 如果有特殊要求，附加在描述里
+            if reqs:
+                cost_str += f" [需: {', '.join(reqs)}]"
+            options[mode] = cost_str
              
         return options
 
@@ -116,22 +93,25 @@ class PhysicalityEngine:
                 level = char_data.get("level", "凡人")
                 lines.append(f"- {name}: [境界: {level}] [金币: {gold}] [物品: {inventory}]")
         
-        # 3. 旅行方案
+        # 3. 旅行方案 (Dynamic DB Lookup)
         lines.append("\n## 可选旅行方案 (从当前位置出发)")
         lines.append("作者可根据剧情需要选择以下任一方式，但必须在文中体现对应的代价/条件：")
         
-        found_routes = False
-        if current_location in self.world_map:
-            for dest in self.world_map[current_location].keys():
-                opts = self.get_travel_options(current_location, dest)
-                if opts:
-                    found_routes = True
-                    lines.append(f"   > 去往【{dest}】:")
-                    for mode, desc in opts.items():
-                        lines.append(f"     - {mode}: {desc}")
+        # 获取当前地点的所有出口
+        outbound = self.memory.get_outbound_routes(current_location)
         
-        if not found_routes:
-             # 尝试反向查找作为补充提示
-             lines.append(f"- {current_location} (当前无明确外连道路，请参考世界地图或自由发挥，但需遵循逻辑)")
+        if outbound:
+            for route in outbound:
+                dest = route["target"]
+                methods = route["methods"]
+                lines.append(f"   > 去往【{dest}】:")
+                for mode, desc in methods.items():
+                    req_str = f" [需: {', '.join(route['requirements'])}]" if route['requirements'] else ""
+                    lines.append(f"     - {mode}: {desc}{req_str}")
+        else:
+             # 获取地点描述
+             loc_info = self.memory.get_location_info(current_location)
+             desc = loc_info['description'] if loc_info else "未知区域"
+             lines.append(f"- {current_location}: {desc} (当前无明确外连道路，请参考世界地图或自由发挥)")
 
         return "\n".join(lines)

@@ -235,6 +235,32 @@ class MemoryManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # --- 地理信息系统 (GIS) ---
+        
+        # 地点表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS locations (
+                name TEXT PRIMARY KEY,
+                description TEXT,
+                type TEXT, -- City, Wild, Dungeon, Sect
+                faction TEXT, -- 所属势力
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 路径表 (有向图)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT,
+                target TEXT,
+                travel_time_days INTEGER,
+                travel_methods TEXT, -- JSON: {"Walk": "desc", "Fly": "desc"}
+                requirements TEXT, -- JSON: ["Level > 10", "Item:Map"]
+                UNIQUE(source, target)
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -418,7 +444,8 @@ class MemoryManager:
                     "type": "bible_truth", 
                     "category": category, 
                     "topic": topic, 
-                    "entry_id": entry_id
+                    "entry_id": entry_id,
+                    "status": "active"
                 }
             )
         ])
@@ -457,8 +484,9 @@ class MemoryManager:
         semantic_docs = self.vector_store.similarity_search(
             query, 
             k=5, 
-            filter={"type": "bible_truth"}
+            filter={"$and": [{"type": "bible_truth"}, {"status": "active"}]}
         )
+
         
         for doc in semantic_docs:
             eid = doc.metadata.get("entry_id")
@@ -1109,7 +1137,7 @@ class MemoryManager:
         conn.close()
         
         full_text = f"[{layer}] {character_name} {event_type}: {description}"
-        self.event_store.add_documents([Document(page_content=full_text, metadata={"event_id": event_id, "chapter": chapter_num, "character": character_name, "type": event_type, "layer": layer})])
+        self.event_store.add_documents([Document(page_content=full_text, metadata={"event_id": event_id, "chapter": chapter_num, "character": character_name, "type": event_type, "layer": layer, "status": "active"})])
 
         # --- Graph Synchronization ---
         # 仅同步 Reality 层的事件进图谱，避免臆想污染因果链
@@ -1202,6 +1230,59 @@ class MemoryManager:
         conn.close()
         return [{"id": r[0], "chapter": r[1], "content": r[2]} for r in rows]
 
+    # --- 地理信息管理 (GIS) ---
+
+    def add_location(self, name: str, description: str, loc_type: str = "Unknown", faction: str = "None"):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO locations (name, description, type, faction) VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET description=excluded.description, type=excluded.type, faction=excluded.faction
+        ''', (name, description, loc_type, faction))
+        conn.commit()
+        conn.close()
+
+    def add_route(self, source: str, target: str, days: int, methods: Dict[str, str], requirements: List[str] = None):
+        if requirements is None: requirements = []
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO routes (source, target, travel_time_days, travel_methods, requirements) 
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(source, target) DO UPDATE SET 
+                travel_time_days=excluded.travel_time_days, 
+                travel_methods=excluded.travel_methods,
+                requirements=excluded.requirements
+        ''', (source, target, days, json.dumps(methods), json.dumps(requirements)))
+        conn.commit()
+        conn.close()
+
+    def get_location_info(self, name: str) -> Optional[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, description, type, faction FROM locations WHERE name = ?', (name,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {"name": row[0], "description": row[1], "type": row[2], "faction": row[3]}
+        return None
+
+    def get_outbound_routes(self, source: str) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT target, travel_time_days, travel_methods, requirements FROM routes WHERE source = ?', (source,))
+        rows = cursor.fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            results.append({
+                "target": r[0],
+                "days": r[1],
+                "methods": json.loads(r[2]),
+                "requirements": json.loads(r[3])
+            })
+        return results
+
     # --- 向量存储与混合检索 ---
 
     def add_chapter_context(self, text: str, chapter_num: int, metadata: Dict[str, Any] = None):
@@ -1239,21 +1320,70 @@ class MemoryManager:
             print(f"⚠️ Entity Extraction Failed: {e}")
             return []
 
-    def archive_entity_memory(self, entity_name: str):
+    def archive_entity_memory(self, entity_name: str, reason: str = "Dead"):
         """
         [墓地机制] 将指定实体的相关记忆归档。
-        这会“软删除”该角色的事件日志，使其不再出现在常规检索中。
+        1. SQL: 更新角色状态为 'Dead' (或传入的 reason)。
+        2. VectorDB: 查找所有关联该角色的 Document，更新 metadata['status'] = 'archived'。
         """
-        # 1. Archive Events
-        # Chroma 不支持直接 update_where，需要 get -> update
-        # 这里简化处理：我们假设 event_store 和 vector_store 是分开的
+        print(f"🪦 Archiving memories for: {entity_name} ({reason})...")
         
-        print(f"🪦 Archiving memories for: {entity_name}...")
-        
-        # 暂时仅演示逻辑。在生产环境中，这需要遍历所有相关 ID 并调用 collection.update
-        # self.vector_store._collection.update(where={"character": entity_name}, metadatas=[{"status": "archived"}])
-        # 由于 LangChain Chroma 封装限制，这里暂留接口，实际依靠 query 时的过滤
-        pass
+        # 1. Update SQL Status
+        char_id = self._get_id_by_name(entity_name)
+        if char_id:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # 读取旧数据
+            cursor.execute('SELECT data FROM characters WHERE id = ?', (char_id,))
+            row = cursor.fetchone()
+            if row:
+                data = json.loads(row[0])
+                data["current_state"] = reason # e.g. "Dead", "Missing", "Sealed"
+                data["is_active"] = False
+                
+                cursor.execute('UPDATE characters SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', 
+                               (json.dumps(data), char_id))
+                conn.commit()
+                print(f"   -> SQL Status updated to '{reason}'")
+            conn.close()
+        else:
+            print(f"   ⚠️ Character '{entity_name}' not found in SQL.")
+
+        # 2. Update Vector Metadata (The "Ghost" Fix)
+        # Chroma 的 update 需要 ids。所以必须先 query 获取 ids。
+        try:
+            # 获取 collection 对象 (hacky way to access underlying chroma collection)
+            collection = self.vector_store._collection
+            
+            # 查找所有 metadata 中 character == entity_name 的记录
+            # 注意：Chroma 的 where 只能精确匹配。如果 metadata["character"] 是列表或包含多个人，这里可能漏网。
+            # 目前系统存储时 metadata["character"] 通常是主要角色名。
+            results = collection.get(where={"character": entity_name})
+            
+            ids_to_update = results['ids']
+            if ids_to_update:
+                print(f"   -> Found {len(ids_to_update)} vector memories. Applying 'archived' tag...")
+                
+                # 准备新的 metadata (保留旧的，更新 status)
+                # Chroma 的 update(ids=..., metadatas=...) 会覆盖 metadata。所以我们需要先读取旧的合并。
+                # 但这里简化处理：假设我们需要的就是打上 archived 标签。
+                # 为了安全，我们只更新 status 字段，保留其他字段有点麻烦，因为 collection.update 需要全量 metadata。
+                # 更好的做法是：read -> merge -> update。
+                
+                current_metadatas = results['metadatas']
+                new_metadatas = []
+                for meta in current_metadatas:
+                    new_meta = meta.copy()
+                    new_meta["status"] = "archived"
+                    new_metadatas.append(new_meta)
+                
+                collection.update(ids=ids_to_update, metadatas=new_metadatas)
+                print("   ✅ Vector Archive Complete.")
+            else:
+                print("   -> No vector memories found to archive.")
+                
+        except Exception as e:
+            print(f"   ⚠️ Vector Archive Failed: {e}")
 
     def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False) -> str:
         """
