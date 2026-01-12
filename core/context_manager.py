@@ -2,6 +2,10 @@ import tiktoken
 from typing import List, Dict, Any, Optional
 from core.memory import MemoryManager
 import json
+from langchain_core.output_parsers import StrOutputParser
+from core.llm import get_deepseek_chat
+from core.prompts import CONTEXT_INTENT_PROMPT
+import re
 
 class ContextManager:
     """
@@ -34,6 +38,10 @@ class ContextManager:
             "prev_summary": 2000,
             "vocabulary": 1000,
         }
+        
+        # 初始化意图分类链
+        self.llm = get_deepseek_chat(temperature=0.1) # 意图分析需要冷静、准确
+        self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
 
     def _count_tokens(self, text: str) -> int:
         return len(self.encoder.encode(text))
@@ -139,32 +147,50 @@ class ContextManager:
 
     def _analyze_plot_intent(self, outline: str) -> Dict[str, Any]:
         """
-        [核心逻辑] 意图解析器：分析大纲需要什么样的背景知识。
+        [核心逻辑升级] AI 意图解析器
+        使用 DeepSeek-V3 快速分析情节意图，返回结构化检索指令。
         """
-        # 这里未来可以调用一个轻量级的 LLM (如 DeepSeek-V3) 来做解析
-        # 目前先用关键词启发式逻辑作为 Baseline
-        intent = {
-            "type": "general",
-            "entities": [],
-            "needs_skills": False,
-            "needs_relations": False,
-            "needs_history": False,
-            "needs_hooks": False
-        }
-        
-        # 简单启发式分析
-        low_outline = outline.lower()
-        if any(w in low_outline for w in ["打", "战", "杀", "斗", "招式", "伤"]):
-            intent["type"] = "combat"
-            intent["needs_skills"] = True
-        elif any(w in low_outline for w in ["说", "谈", "骂", "争执", "秘密", "心想"]):
-            intent["type"] = "dialogue"
-            intent["needs_relations"] = True
-        elif any(w in low_outline for w in ["发现", "原来", "真相", "线索", "伏笔"]):
-            intent["type"] = "revelation"
-            intent["needs_hooks"] = True
+        print("   🧠 正在解析本章叙事意图...")
+        try:
+            response = self.intent_chain.invoke({"outline": outline})
             
-        return intent
+            # 清理可能的 markdown 包裹
+            clean_json = response.strip()
+            if "```json" in clean_json:
+                clean_json = re.search(r'```json\s*(\{.*\})\s*```', clean_json, re.DOTALL).group(1)
+            elif "```" in clean_json:
+                clean_json = clean_json.replace("```", "")
+                
+            intent_data = json.loads(clean_json)
+            # 简单的验证，确保字段存在
+            required_fields = ["type", "needs_skills", "needs_relations", "needs_history", "needs_hooks", "needs_world_rules"]
+            for field in required_fields:
+                if field not in intent_data:
+                    intent_data[field] = False # Default fallback
+            
+            print(f"   👉 意图识别: [{intent_data.get('type')}] - 需要技能:{intent_data.get('needs_skills')} | 需要关系:{intent_data.get('needs_relations')}")
+            return intent_data
+            
+        except Exception as e:
+            print(f"   ⚠️ 意图解析失败，回退到基础模式: {e}")
+            # Fallback heuristic
+            intent = {
+                "type": "General",
+                "needs_skills": False,
+                "needs_relations": False,
+                "needs_history": False,
+                "needs_hooks": False,
+                "needs_world_rules": False
+            }
+            low_outline = outline.lower()
+            if any(w in low_outline for w in ["打", "战", "杀", "斗", "招式", "伤"]):
+                intent["type"] = "Combat"
+                intent["needs_skills"] = True
+            elif any(w in low_outline for w in ["说", "谈", "骂", "争执", "秘密", "心想"]):
+                intent["type"] = "Social"
+                intent["needs_relations"] = True
+                
+            return intent
 
     def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None) -> str:
         """
@@ -174,8 +200,13 @@ class ContextManager:
         intent = self._analyze_plot_intent(outline)
         
         # --- 1. World Bible (绝对真理层) ---
-        # 检索逻辑：除了搜大纲，还要显式搜“世界规则”和“地理设定”
-        bible_query = f"{scene_location} {outline[:50]}"
+        # 检索逻辑升级：根据 intent['needs_world_rules'] 决定是否深度检索设定
+        bible_query = f"{scene_location}"
+        if intent.get('needs_world_rules') or intent.get('needs_skills'):
+             bible_query += f" {outline[:100]} 功法 境界 规则"
+        else:
+             bible_query += f" {outline[:50]}"
+             
         bible_text = self.memory.get_bible_context(query=bible_query, active_entities=active_characters)
         
         current_budget = self.total_budget - self._count_tokens(bible_text)
@@ -194,10 +225,10 @@ class ContextManager:
 
         # 强制获取活跃伏笔 (不再靠 RAG 碰运气)
         active_hooks = ""
-        if intent["needs_hooks"] or intent["type"] == "revelation":
+        if intent["needs_hooks"] or intent["type"] == "Investigation":
             hooks = self.memory.get_active_foreshadowing()
             if hooks:
-                active_hooks = "\n【当前活跃伏笔】:\n" + "\n".join([f"- {h['content']} (ID:{h['id']})" for h in hooks])
+                active_hooks = "\n【当前活跃伏笔 (需重点关注)】:\n" + "\n".join([f"- {h['content']} (ID:{h['id']})" for h in hooks])
 
         state_text = f"""
 # 🌍 宏观状态
@@ -220,39 +251,51 @@ class ContextManager:
         char_info = "# 👥 角色实时状态\n"
         for char_name in active_characters:
             # 这里的 get_character_details 需要返回结构化的状态栏而非仅仅是简介
+            # 传递 intent 给 character details 可能需要修改 memory 接口，这里先简化，把大纲传进去
             details = self.memory.get_character_details([char_name], query=outline)
             char_info += f"## {char_name}\n{details}\n"
         
         # B. 关系深度检索 (Graph RAG)
         graph_info = ""
-        if intent["needs_relations"] or intent["type"] == "dialogue":
+        if intent["needs_relations"] or intent["type"] == "Social":
             graph_info = "# 🕸️ 社交深度连接\n"
             for char_name in active_characters:
                 # 获取 2 度以内的重要关系路径
                 graph_info += self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
         
         # C. 历史记忆碎片 (Dynamic RAG)
-        # 检索策略改进：如果是在战斗，搜“招式、战绩”；如果是文戏，搜“恩怨、对话往来”
-        rag_query = f"{' '.join(active_characters)} "
-        if intent["type"] == "combat":
-            rag_query += f"战斗 招式 伤痕 {outline[:30]}"
-        elif intent["type"] == "dialogue":
-            rag_query += f"情感 矛盾 承诺 {outline[:30]}"
+        # 检索策略改进：完全基于 Intent 构建 Query
+        rag_query = f"{ ' '.join(active_characters)} "
+        
+        if intent["type"] == "Combat":
+            rag_query += f"战斗 招式 伤痕 弱点 {outline[:50]}"
+        elif intent["type"] == "Social":
+            rag_query += f"情感 矛盾 承诺 谎言 {outline[:50]}"
+        elif intent["type"] == "Investigation":
+            rag_query += f"线索 秘密 历史 真相 {outline[:50]}"
+        elif intent["type"] == "Introspection":
+            rag_query += f"心魔 执念 悟道 {outline[:50]}"
         else:
             rag_query += outline
 
-        rag_content = self.memory.query_related_context(rag_query, k=10)
+        # 如果明确需要历史背景
+        if intent.get("needs_history"):
+            rag_query += " 往事 历史"
+
+        rag_content = self.memory.query_related_context(rag_query, k=12 if intent["needs_history"] else 8)
         
         # --- 4. Assembly & Trimming ---
-        retrieval_text = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片\n{rag_content}"
+        retrieval_text = f"{char_info}\n{graph_info}\n# 🧠 相关记忆碎片 (基于意图:{intent['type']})\n{rag_content}"
         retrieval_trimmed = self._trim_lines_to_budget(retrieval_text, retrieval_budget)
 
         # 获取文风样板 (Mapped from Intent)
         style_map = {
-            "combat": ["Action", "Scenery"],
-            "dialogue": ["Dialogue", "InnerMonologue"],
-            "revelation": ["InnerMonologue", "Scenery"],
-            "general": ["Scenery", "Dialogue"]
+            "Combat": ["Action", "Scenery"],
+            "Social": ["Dialogue", "InnerMonologue"],
+            "Investigation": ["InnerMonologue", "Scenery"],
+            "Introspection": ["InnerMonologue", "Philosophy"],
+            "Travel": ["Scenery"],
+            "General": ["Scenery", "Dialogue"]
         }
         target_styles = style_map.get(intent["type"], ["Scenery"])
         style_text = self.memory.get_style_examples(tags=target_styles)

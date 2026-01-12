@@ -106,6 +106,8 @@ class MemoryManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chapter_created INTEGER,
                 content TEXT,
+                importance INTEGER DEFAULT 5, -- 1-10 (1:Flavor, 10:Core Mystery)
+                tags TEXT, -- JSON list e.g. ["Identity", "Weapon"]
                 status TEXT DEFAULT 'active',
                 chapter_resolved INTEGER,
                 notes TEXT,
@@ -1132,10 +1134,21 @@ class MemoryManager:
             
         return "\n".join(result_lines)
 
-    def add_foreshadowing(self, chapter_num: int, content: str):
+    def add_foreshadowing(self, chapter_num: int, content: str, importance: int = 5, tags: List[str] = None):
+        if tags is None: tags = []
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO foreshadowing (chapter_created, content) VALUES (?, ?)', (chapter_num, content))
+        
+        # 简单的 Migration Check (开发环境用)
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN importance INTEGER DEFAULT 5')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN tags TEXT')
+        except: pass
+            
+        cursor.execute('INSERT INTO foreshadowing (chapter_created, content, importance, tags) VALUES (?, ?, ?, ?)', 
+                       (chapter_num, content, importance, json.dumps(tags)))
         conn.commit()
         conn.close()
 

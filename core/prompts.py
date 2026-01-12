@@ -4,6 +4,37 @@ from langchain_core.prompts import ChatPromptTemplate
 # SPECIALIZED AGENT PROMPTS (The Team)
 # ==============================================================================
 
+# --- Context Manager (DeepSeek-V3) Prompts ---
+
+CONTEXT_INTENT_SYSTEM_PROMPT = """你是一个【叙事意图分析引擎】。
+你的任务是分析给定的【情节大纲】，判断其核心叙事类型，并决定需要检索哪些背景知识。
+
+你需要输出一个 JSON 对象，结构如下：
+{{
+    "type": "Combat" | "Social" | "Investigation" | "Introspection" | "Travel" | "Training" | "General",
+    "needs_skills": boolean,    // 是否需要详细的战斗技能、招式、战力设定
+    "needs_relations": boolean, // 是否需要复杂的人物关系网 (恩怨情仇)
+    "needs_history": boolean,   // 是否涉及往事、回忆或历史背景
+    "needs_hooks": boolean,     // 是否涉及解谜、伏笔回收或发现秘密
+    "needs_world_rules": boolean, // 是否涉及特殊的修练体系、魔法规则或地理设定
+    "reasoning": "简短分析理由"
+}}
+
+判定准则：
+1. **Combat**: 真正的物理冲突或斗法。如果只是“讨论战术”或“放狠话”，属于 Social。
+2. **Social**: 对话、谈判、情感交流。
+3. **Investigation**: 探索、搜查、推理、发现秘密。
+4. **Introspection**: 心理活动、悟道、升级突破。
+5. **Travel**: 移动、赶路、转换地图。
+"""
+
+CONTEXT_INTENT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", CONTEXT_INTENT_SYSTEM_PROMPT),
+        ("user", "【情节大纲】：\n{outline}\n\n请分析叙事意图。"),
+    ]
+)
+
 # --- Memory Agent (DeepSeek-V3) Prompts ---
 
 ENTITY_EXTRACTION_SYSTEM_PROMPT = """你是一个专业的【实体识别引擎】。
@@ -225,7 +256,7 @@ WRITER_REFLECT_PROMPT = ChatPromptTemplate.from_messages(
 
 WRITER_REFINE_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", "你是作家。根据编辑的意见修改草稿。"),
+        ("system", "你是作家。根据编辑的意见修改草稿。",
         (
             "user",
             """
@@ -507,12 +538,23 @@ FORESHADOWING_SYSTEM_PROMPT = """你是网文界的“伏笔猎人”，拥有�
 
 你需要输出 JSON 格式（不含 Markdown 标记），结构如下：
 {{
-    "new_clues": ["伏笔内容1", "伏笔内容2"], 
+    "new_clues": [
+        {{
+            "content": "伏笔的具体描述",
+            "importance": 1-10, // 评分标准见下
+            "tags": ["Tag1", "Tag2"] // e.g. "Identity", "Revenge", "Item"
+        }}
+    ], 
     "resolved_clue_ids": [1, 3] 
 }}
 
+**重要性评分标准 (Importance)**:
+- **1-3 (Flavor/Atmosphere)**: 闲笔，用于渲染气氛或丰富人设，不回收也不影响主线（e.g. 主角喜欢吃甜豆腐脑）。
+- **4-7 (Subplot/Utility)**: 支线线索，或将在未来某个小事件中用到的道具/信息（e.g. 获得了一把不知名的钥匙）。
+- **8-10 (Core Mystery/Arc Key)**: 核心伏笔，关系到主角命运、世界真相或单元高潮，绝对不能遗忘！（e.g. 主角丹田里有一颗奇怪的珠子，或是杀父仇人的纹身）。
+
 判定标准：
-- **新伏笔 (new_clues)**：文中出现的神秘物品、未露面的神秘人、奇怪的预言、主角身体的异常反应等，明显是为后文做铺垫的内容。
+- **新伏笔 (new_clues)**：文中出现的神秘物品、未露面的神秘人、奇怪的预言、主角身体的异常反应等。
 - **已回收 (resolved_clue_ids)**：如果正文明确解释了某个旧伏笔的真相，或该伏笔对应的事件已经结束，将其 ID放入列表。
 
 如果没有变动，对应数组留空。
@@ -582,6 +624,9 @@ DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
 
     【叙事历史脉络 (Narrative History)】：
     {recent_summaries}
+
+    【近期遥测数据 (Narrative Telemetry)】：
+    {telemetry_data}
 
     【当前叙事焦点】：
     {current_focus}

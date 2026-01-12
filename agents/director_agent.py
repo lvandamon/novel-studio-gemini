@@ -36,6 +36,32 @@ class DirectorAgent:
         # 4. Fallback: return original stripped (likely to fail but worth a try)
         return text.strip()
 
+    def _format_telemetry(self, current_chapter: int) -> str:
+        """格式化最近的遥测数据"""
+        # 获取最近 5 章数据
+        history = self.memory.get_metrics_history(limit=5) # 这里的 limit 应该在 memory 方法里实现，或者取回后切片
+        # 由于 memory.get_metrics_history 实现是全部返回，我们在这里切片
+        if not history:
+            return "（暂无遥测数据，系统处于初始化阶段）"
+            
+        recent = history[-5:]
+        
+        lines = []
+        avg_tension = 0
+        for h in recent:
+            # 简单的图形化表示
+            tension_bar = "🔥" * (h['tension'] // 20)
+            pacing_bar = "⏩" * (h['pacing'] // 20)
+            lines.append(f"- Ch{h['chapter']}: Tension {h['tension']} {tension_bar} | Pacing {h['pacing']} {pacing_bar} | Logic {h['plot_logic']}")
+            avg_tension += h['tension']
+            
+        avg_tension /= len(recent)
+        trend = "平稳"
+        if avg_tension > 75: trend = "高压 (High Tension)"
+        elif avg_tension < 30: trend = "松弛 (Low Tension)"
+        
+        return f"趋势分析: {trend} (Avg Tension: {avg_tension:.1f})\n" + "\n".join(lines)
+
     def evaluate_progress(self, current_chapter: int) -> Dict[str, Any]:
         """
         审计当前进度，并返回指导意见。
@@ -46,16 +72,17 @@ class DirectorAgent:
         plan = self.memory.get_active_plan()
         focus = self.memory.get_narrative_focus()
 
-        # Chaos Check
-        # 从 Memory 获取上一章真实的 tension (Narrative Telemetry)
-        metrics_history = self.memory.get_metrics_history(limit=1)
+        # Chaos Check & Telemetry
+        metrics_history = self.memory.get_metrics_history() # fetch all
+        
+        real_tension = 50.0
         if metrics_history:
-            # 取最近一章的张力值，并归一化到 0.0 - 1.0
             last_chapter_data = metrics_history[-1]
             real_tension = last_chapter_data.get("tension", 50) / 100.0
             print(f"   📊 Director: 检测到上一章真实张力为 {real_tension:.2f}")
-        else:
-            real_tension = 0.5 # 默认中等张力
+            
+        # 格式化遥测数据用于 Prompt
+        telemetry_text = self._format_telemetry(current_chapter)
             
         chaos_card = self.chaos_engine.roll_for_chaos(current_chapter, current_tension=real_tension)
         
@@ -104,7 +131,7 @@ class DirectorAgent:
 """
 
         # 计算进度
-        arc_data = plan.get("arc", {}) or {}
+        arc_data = plan.get("arc", {})
         start_chapter = arc_data.get("start_chapter", 1)
         chapters_used = current_chapter - start_chapter + 1
         
@@ -119,7 +146,8 @@ class DirectorAgent:
                 "current_chapter": current_chapter,
                 "chapters_used": chapters_used,
                 "end_chapter_estimated": arc_data.get("end_chapter_estimated", "未设定"),
-                "recent_summaries": full_history_context, 
+                "recent_summaries": full_history_context,
+                "telemetry_data": telemetry_text,
                 "current_focus": json.dumps(focus, ensure_ascii=False),
                 "chaos_injection": chaos_prompt_injection 
             })
