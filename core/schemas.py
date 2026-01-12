@@ -41,6 +41,31 @@ class MentalStateEntry(BaseModel):
     sanity: int = Field(100, ge=0, le=100) # 理智值/SAN值 (0-100)
     reason: str
 
+# --- Hard Logic Extensions (v2.0) ---
+
+class BodyPartStatus(BaseModel):
+    name: str # e.g. "左臂", "丹田", "神识"
+    health: int = Field(100, ge=0, le=100)
+    is_severed: bool = False # 是否缺失/断裂 (永久性物理损伤)
+    is_crippled: bool = False # 是否残废 (功能性丧失)
+    notes: str = "" # e.g. "被魔气侵蚀，无法运气"
+
+class StatusEffect(BaseModel):
+    name: str # e.g. "剧毒", "走火入魔", "剑意护体"
+    description: str
+    intensity: int = 1 # 层数/烈度
+    duration_chapters: int = 0 # 剩余持续章节数 (0表示永久或直到治愈)
+    is_hidden: bool = False # 是否对本人隐藏 (如潜伏期病毒)
+
+class InventoryItem(BaseModel):
+    name: str
+    category: str = "General" # Weapon, Consumable, KeyItem
+    description: str = ""
+    quantity: int = 1
+    durability: int = 100 # 100=Perfect, 0=Broken
+    status: str = "Normal" # "Normal", "Cursed", "Sealed"
+    is_equipped: bool = False
+
 class CharacterSchema(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -48,13 +73,25 @@ class CharacterSchema(BaseModel):
     role: str = "未知"
     level: str = "未知"
     personality: List[str] = Field(default_factory=list) # 静态性格标签
-    psychological_state: str = "平稳" # 简要当前状态
-    mental_ledger: List[MentalStateEntry] = Field(default_factory=list) # 精神体检账本 (Mental State Ledger)
+    
+    # --- State & Physiology ---
+    psychological_state: str = "平稳" # 简要心理状态
+    current_state: str = "正常" # 简要生理状态 (Legacy summary)
+    
+    # [New] Hard Logic Fields
+    body_status: List[BodyPartStatus] = Field(default_factory=list) # 身体部件状态 (为空则默认健康)
+    active_effects: List[StatusEffect] = Field(default_factory=list) # 当前生效的 Buff/Debuff
+    
+    mental_ledger: List[MentalStateEntry] = Field(default_factory=list) # 精神体检账本
     relationships: Dict[str, str] = Field(default_factory=dict)
-    inventory: List[str] = Field(default_factory=list)
+    
+    # [New] Structured Inventory
+    inventory: List[InventoryItem] = Field(default_factory=list) # 结构化物品栏
+    # Legacy field support (for backward compatibility during migration)
+    # inventory_str: List[str] = Field(default_factory=list) 
+    
     gold: int = Field(default=0, description="角色持有的金币数量")
     goals: List[str] = Field(default_factory=list)
-    current_state: str = "正常"
     location: str = "未知" 
     importance: str = "NPC" # 可选: "Protagonist", "Major", "Minor", "NPC"
     last_updated_chapter: int = 0

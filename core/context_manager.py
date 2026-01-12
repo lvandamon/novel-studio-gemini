@@ -292,12 +292,16 @@ class ContextManager:
             details = self.memory.get_character_details([char_name], query=outline)
             char_info += f"## {char_name}\n{details}\n"
         
-        # B. 关系深度检索
+        # B. 关系深度检索 (Subgraph Extraction)
         graph_info = ""
-        if intent["needs_relations"] or intent["type"] == "Social":
-            graph_info = "# 🕸️ 社交深度连接\n"
+        if intent["needs_relations"] or intent["type"] == "Social" or len(active_characters) > 1:
+            graph_info = self.memory.graph.get_multi_entity_relationships(active_characters)
+        else:
+            # 单人场景或无复杂关系，只查简单的邻居
             for char_name in active_characters:
-                graph_info += self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
+                 neighbors = self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
+                 if "暂无" not in neighbors:
+                     graph_info += f"## {char_name} 的周边关系\n{neighbors}\n"
         
         # C. 历史记忆碎片
         rag_query = f"{ ' '.join(active_characters)} "

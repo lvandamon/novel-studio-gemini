@@ -574,18 +574,64 @@ class MemoryManager:
                     # 集合型：去重合并
                     merged_data[list_key] = list(set(old_list + new_list))
 
-            # C. 物品栏 (Inventory) 特殊处理: 支持增减
-            # 1. 添加新物品
-            current_inv = set(merged_data.get("inventory", []) or [])
-            new_inv = set(update_data.get("inventory", []) or [])
-            current_inv.update(new_inv)
+            # C. 物品栏 (Inventory) 特殊处理: 支持结构化增减
+            # 1. 获取当前物品字典 (Name -> ItemDict) 用于合并
+            current_inv_list = merged_data.get("inventory", []) or []
+            current_inv_map = {}
+            for item in current_inv_list:
+                # 兼容旧数据 (str)
+                if isinstance(item, str):
+                    current_inv_map[item] = {"name": item, "category": "General", "quantity": 1}
+                else:
+                    current_inv_map[item["name"]] = item
             
-            # 2. 移除物品 (Explicit Removal)
+            # 2. 处理新物品 (合并或覆盖)
+            new_inv_list = update_data.get("inventory", []) or []
+            for item in new_inv_list:
+                # 同样兼容输入可能是 str (虽然 Schema 要求对象，但为了 robust)
+                if isinstance(item, str):
+                    name = item
+                    item_data = {"name": item, "category": "General", "quantity": 1}
+                else:
+                    name = item["name"]
+                    item_data = item
+                
+                # Logic: 如果已存在，更新数量/状态；如果不存在，添加
+                # 这里简单处理：直接覆盖属性，但累加数量? 
+                # 暂定: 直接覆盖属性 (假设 Writer Agent 能够给出最新状态)
+                current_inv_map[name] = item_data
+            
+            # 3. 移除物品
             removed_items = set(update_data.get("removed_items", []) or [])
-            current_inv.difference_update(removed_items)
+            for r_name in removed_items:
+                if r_name in current_inv_map:
+                    del current_inv_map[r_name]
             
-            merged_data["inventory"] = list(current_inv)
+            merged_data["inventory"] = list(current_inv_map.values())
             
+            # --- Hard Logic State Merging (Body & Effects) ---
+            # 策略：按 Name 唯一键合并
+            
+            # Body Status
+            current_body = {b["name"]: b for b in merged_data.get("body_status", [])}
+            new_body = update_data.get("body_status", []) or []
+            for b in new_body:
+                current_body[b["name"]] = b # 直接覆盖最新状态
+            merged_data["body_status"] = list(current_body.values())
+
+            # Active Effects
+            current_effects = {e["name"]: e for e in merged_data.get("active_effects", [])}
+            new_effects = update_data.get("active_effects", []) or []
+            for e in new_effects:
+                # 如果 duration 为 0 (且原本存在)，可能意味着移除？
+                # 不，通常移除应该显式。这里假设 duration=0 是无限或保持。
+                # 暂定策略：直接覆盖
+                current_effects[e["name"]] = e
+            
+            # 清理过期的 Effects (Simple Logic: Check external cleaner or duration)
+            # 这里暂不处理自动过期，留给 Director/Physics 每一章结束时处理
+            merged_data["active_effects"] = list(current_effects.values())
+
             # --- 字典型字段合并 ---
             old_rel = merged_data.get("relationships", {}) or {}
             new_rel = update_data.get("relationships", {}) or {}
@@ -608,7 +654,7 @@ class MemoryManager:
 
             # --- 其他字段覆盖 (Level, Status, Role, Importance) ---
             # 这些字段通常是单值，直接覆盖
-            exclude_keys = overwrite_keys + append_keys + ["relationships", "id", "psychological_state", "inventory", "removed_items"]
+            exclude_keys = overwrite_keys + append_keys + ["relationships", "id", "psychological_state", "inventory", "removed_items", "body_status", "active_effects"]
             for k, v in update_data.items():
                 if k not in exclude_keys and v is not None: 
                     merged_data[k] = v
@@ -618,20 +664,25 @@ class MemoryManager:
             merged_data["id"] = char_id
             
             # 初始化列表 (防止 None)
-            for k in ["aliases", "personality", "goals", "inventory", "psychological_history", "dialogue_examples"]:
+            for k in ["aliases", "personality", "goals", "inventory", "psychological_history", "dialogue_examples", "body_status", "active_effects"]:
                 if k not in merged_data or merged_data[k] is None:
                     merged_data[k] = []
                     
             if name not in merged_data["aliases"]:
                 merged_data["aliases"].append(name)
             
-            # 处理 Inventory/Removed logic even for new char (rare but consistent)
+            # 处理 Inventory/Removed logic even for new char
             if "removed_items" in merged_data:
-                # remove from potentially initial inventory
-                inv = set(merged_data.get("inventory", []))
-                inv.difference_update(set(merged_data["removed_items"]))
-                merged_data["inventory"] = list(inv)
-                del merged_data["removed_items"]
+                del merged_data["removed_items"] # 新角色没有需要移除的
+            
+            # Normalize Inventory to Objects if they are strings
+            normalized_inv = []
+            for item in merged_data["inventory"]:
+                if isinstance(item, str):
+                    normalized_inv.append({"name": item, "category": "General", "quantity": 1})
+                else:
+                    normalized_inv.append(item)
+            merged_data["inventory"] = normalized_inv
 
         merged_data["last_updated_chapter"] = chapter_num
         merged_data["name"] = name 

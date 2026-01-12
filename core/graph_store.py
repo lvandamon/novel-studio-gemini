@@ -238,6 +238,56 @@ class GraphManager:
         return "未发现直接联系。"
 
     @retry_neo4j()
+    def get_multi_entity_relationships(self, entities: List[str], max_depth: int = 2) -> str:
+        """
+        [Narrative Subgraph Extraction]
+        针对多角色场景，提取它们之间错综复杂的关系网。
+        不仅仅是两两之间的最短路径，还包含它们共同的重要邻居（中间人）。
+        """
+        if len(entities) < 2:
+            return self.query_entity_context(entities[0]) if entities else ""
+            
+        # Cypher: 查找任意两个实体之间的路径
+        # 为了性能，限制 max_depth
+        query = f"""
+        MATCH (n) WHERE n.name IN $names
+        MATCH (m) WHERE m.name IN $names AND id(n) < id(m)
+        MATCH p = allShortestPaths((n)-[*..{max_depth}]-(m))
+        RETURN p
+        LIMIT 20
+        """
+        
+        paths_found = set()
+        
+        with self.driver.session() as session:
+            result = session.run(query, names=entities)
+            for record in result:
+                path = record["p"]
+                # 格式化路径字符串
+                nodes = [n.get("name") for n in path.nodes]
+                rels = [r.type for r in path.relationships]
+                
+                # A -[Rel]-> B
+                seg_str = ""
+                for i in range(len(rels)):
+                    start_node = nodes[i]
+                    end_node = nodes[i+1]
+                    r_type = rels[i]
+                    
+                    # 尝试判断方向 (Neo4j path relationship logic in Python driver is tricky, 
+                    # relying on simple representation here)
+                    # 简化表示: A --[TYPE]--> B
+                    seg_str += f"({start_node}) --[{r_type}]--> "
+                
+                seg_str += f"({nodes[-1]})"
+                paths_found.add(seg_str)
+                
+        if not paths_found:
+            return "（主要角色之间暂无深层历史关联）"
+            
+        return "# 🕸️ 深度关系网 (Deep Connections)\n" + "\n".join(sorted(list(paths_found)))
+
+    @retry_neo4j()
     def get_visualization_data(self, limit: int = 100) -> Dict[str, List[Dict]]:
         query = f"""
         MATCH (n)-[r]->(m)

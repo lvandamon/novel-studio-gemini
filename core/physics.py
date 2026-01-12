@@ -75,7 +75,8 @@ class PhysicalityEngine:
 
     def get_hard_constraints_for_prompt(self, character_names: List[str], current_location: str) -> str:
         """
-        为 Prompt 生成硬约束文本。
+        为 Prompt 生成硬约束文本 (Hard Constraints)。
+        包含：时间、金钱、物品(带状态)、生理残疾(Critical)、当前Buff/Debuff。
         """
         lines = ["# ⚙️ 物理法则 (Hard Constraints) - 必须严格遵守"]
         
@@ -83,18 +84,76 @@ class PhysicalityEngine:
         current_date = self.memory.get_narrative_focus().get("date", "未知")
         lines.append(f"- 当前世界时间: {current_date}")
 
-        # 2. 角色资产
-        lines.append("\n## 资产状况")
+        # 2. 角色硬状态 (Hard State)
+        lines.append("\n## 👥 角色生理与资产状态 (Physiology & Assets)")
         for name in character_names:
             char_data = self.memory.get_character(name)
-            if char_data:
-                gold = char_data.get("gold", 0)
-                inventory = ", ".join(char_data.get("inventory", [])) or "空"
-                level = char_data.get("level", "凡人")
-                lines.append(f"- {name}: [境界: {level}] [金币: {gold}] [物品: {inventory}]")
+            if not char_data: continue
+            
+            level = char_data.get("level", "凡人")
+            gold = char_data.get("gold", 0)
+            
+            # Header
+            lines.append(f"### {name} [Level: {level}] [Gold: {gold}]")
+            
+            # A. Critical Body Status (残疾/损伤)
+            body_status = char_data.get("body_status", [])
+            has_critical = False
+            for part in body_status:
+                status_tags = []
+                if part.get("is_severed"): status_tags.append("❌缺失/SEVERED")
+                if part.get("is_crippled"): status_tags.append("⚠️残废/CRIPPLED")
+                
+                if status_tags:
+                    has_critical = True
+                    health = part.get("health", 0)
+                    note = part.get("notes", "")
+                    lines.append(f"   🚨 [部位警报] {part['name']}: {' '.join(status_tags)} (HP:{health}%) {note}")
+            
+            if not has_critical and body_status:
+                 # 如果有数据但没残疾，简要显示健康度低的
+                 for part in body_status:
+                     if part.get("health", 100) < 50:
+                         lines.append(f"   ⚠️ [部位受伤] {part['name']}: HP {part['health']}%")
+
+            # B. Active Effects (Buff/Debuff)
+            effects = char_data.get("active_effects", [])
+            for ef in effects:
+                dur = f"{ef['duration_chapters']}章" if ef.get('duration_chapters') > 0 else "持续"
+                lines.append(f"   🌀 [状态: {ef['name']}] (Lv.{ef.get('intensity',1)}) [{dur}] - {ef.get('description', '')}")
+
+            # C. Inventory (Structured)
+            inv_list = char_data.get("inventory", [])
+            if inv_list:
+                items_str = []
+                for item in inv_list:
+                    # 兼容旧数据 (str)
+                    if isinstance(item, str):
+                        items_str.append(item)
+                    else:
+                        # Structured
+                        name = item.get("name", "Unknown")
+                        durability = item.get("durability", 100)
+                        status = item.get("status", "Normal")
+                        qty = item.get("quantity", 1)
+                        
+                        meta = []
+                        if qty > 1: meta.append(f"x{qty}")
+                        if durability <= 0: meta.append("💔已损毁")
+                        elif durability < 30: meta.append("⚠️濒临损坏")
+                        if status != "Normal": meta.append(f"[{status}]")
+                        
+                        meta_str = f" ({' '.join(meta)})" if meta else ""
+                        items_str.append(f"{name}{meta_str}")
+                
+                lines.append(f"   🎒 物品: {', '.join(items_str)}")
+            else:
+                lines.append("   🎒 物品: [空]")
+            
+            lines.append("") # Spacer
         
         # 3. 旅行方案 (Dynamic DB Lookup)
-        lines.append("\n## 可选旅行方案 (从当前位置出发)")
+        lines.append("## 🗺️ 可选旅行方案 (从当前位置出发)")
         lines.append("作者可根据剧情需要选择以下任一方式，但必须在文中体现对应的代价/条件：")
         
         # 获取当前地点的所有出口
