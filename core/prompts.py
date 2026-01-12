@@ -615,3 +615,109 @@ DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
         ),
     ]
 )
+
+# --- Creator Agent (Novel Initialization) Prompts ---
+
+NOVEL_PROPOSAL_PROMPT = ChatPromptTemplate.from_template("""
+你是一位世界顶级的网文主编和世界观架构师。
+用户希望创作一本新书，基础选项如下：
+- 类型: {genre}
+- 基调: {tone}
+- 结局: {ending}
+- 视角: {perspective}
+
+请基于以上选项，生成一份详细的《小说创作方案》。
+
+要求输出格式为严格的 JSON，包含以下字段：
+{{
+    "title": "书名",
+    "logline": "一句话梗概 (Hook)",
+    "perspective": "{perspective}",
+    "tone": "{tone}",
+    "setting": "世界观与时空背景的详细设定 (300字以内)",
+    "structure": "叙事结构建议 (如: 凡人流升级换地图 / 无限流副本推进)",
+    "core_conflict": "核心冲突与情节架构",
+    "ending_design": "基于'{ending}'结局的具体设计"
+}}
+
+确保内容具有商业吸引力，逻辑自洽，且符合网文读者的期待。
+""")
+
+CHARACTER_GENERATION_PROMPT = ChatPromptTemplate.from_template("""
+你是一位资深的角色设计师。基于以下小说设定，请设计一组核心角色（包括主角、反派、重要配角），总数约 10-15 人。
+
+小说设定：
+标题：{title}
+世界观：{setting}
+核心冲突：{core_conflict}
+
+要求：
+1. **多样性**：性格、背景、动机各异，避免千篇一律。
+2. **冲突潜力**：角色之间必须存在潜在的利益冲突或情感纠葛。
+3. **功能性**：每个角色都要对剧情推动有作用。
+
+请输出 JSON 列表，格式如下：
+[
+    {{
+        "name": "姓名",
+        "role": "身份定位 (如: 主角 / 反派首领 / 搞笑担当)",
+        "importance": "Protagonist" | "Major" | "Minor",
+        "gender": "性别",
+        "age": "年龄 (或视觉年龄)",
+        "appearance": "外貌特征",
+        "personality": ["性格标签1", "性格标签2"],
+        "background": "背景故事简述",
+        "goal": "核心目标/动机",
+        "ability": "特殊能力/金手指",
+        "relationships": {{"关联角色名": "关系描述"}}
+    }},
+    ...
+]
+""")
+
+VOLUME_MAP_PROMPT = ChatPromptTemplate.from_template("""
+你是一位长篇小说架构师。我们需要为小说《{title}》规划一份“全书骨架 (Volume Map)”。
+目标篇幅：约 200 万字 (预计 10-12 卷)。
+
+核心冲突：{core_conflict}
+结局设计：{ending_design}
+
+请设计全书的分卷规划。每一卷都应该是一个相对完整的剧情单元（换地图、境界提升、或解决一个大阴谋）。
+
+输出 JSON 列表：
+[
+    {{
+        "volume_num": 1,
+        "title": "第一卷 卷名",
+        "goal": "本卷核心剧情目标 (如: 主角筑基成功，逃离新手村)",
+        "summary": "本卷剧情大纲 (100字左右)"
+    }},
+    ...
+]
+""")
+
+CHAPTER_OUTLINE_PROMPT = ChatPromptTemplate.from_template("""
+你是一位细纲推演专家。请为小说《{title}》的 **{volume_name}** 生成详细的章节目录。
+
+本卷目标：{volume_goal}
+本卷大纲：{volume_summary}
+预计章节数：{chapter_count} 章 (通常一卷 50-80 章)
+
+要求：
+1. **节奏把控**：需包含铺垫、起伏、高潮（Climax）和收尾。
+2. **网文结构**：每 3-5 章一个小冲突，每 10-20 章一个中高潮。
+3. **连贯性**：章节之间要有钩子（Hook）。
+
+输出 JSON 列表：
+[
+    {{
+        "chapter_num": 1, 
+        "title": "章节名 (如: 重生少年)",
+        "summary": "详细剧情梗概 (50-100字)",
+        "key_events": ["关键事件1", "关键事件2"],
+        "new_characters": ["登场新角色名"]
+    }},
+    ...
+]
+""")
+

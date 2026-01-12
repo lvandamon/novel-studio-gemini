@@ -991,6 +991,15 @@ class MemoryManager:
         conn.commit()
         conn.close()
 
+    def update_chapter_info(self, chapter_num: int, title: str, summary: str):
+        """Update both title and summary for a chapter"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR IGNORE INTO chapters (chapter_num) VALUES (?)', (chapter_num,))
+        cursor.execute('UPDATE chapters SET title = ?, summary = ? WHERE chapter_num = ?', (title, summary, chapter_num))
+        conn.commit()
+        conn.close()
+
     def get_chapter_summary(self, chapter_num: int) -> str:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
