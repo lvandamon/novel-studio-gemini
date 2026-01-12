@@ -65,7 +65,15 @@ class ReviewerAgent:
 【历史记忆】
 {memory_context}
 """
+            # Format Narrative Focus
+            focus_text = f"""
+目标 (Goal): {focus.get('goal', 'N/A')}
+节拍 (Beat): {focus.get('beat', 'N/A')}
+冲突 (Conflict): {focus.get('conflict', 'N/A')}
+            """
+
             response = self.chain.invoke({
+                "narrative_focus": focus_text,
                 "current_theme": current_theme,
                 "character_anchors": anchors_text,
                 "mental_states": mental_text,
@@ -85,6 +93,8 @@ class ReviewerAgent:
             
             # 5. 更新母题回响计数 (文眼政委核心逻辑)
             thematic_score = metrics.get("thematic_score", 0)
+            alignment_score = metrics.get("alignment_score", 0) # New field
+            
             if thematic_score >= 70:
                 print(f"   ✨ Reviewer: 检测到母题回响! (Score: {thematic_score})")
                 self.memory.update_narrative_focus(
@@ -101,21 +111,26 @@ class ReviewerAgent:
 
             status = result_data.get("status", "PASS")
             
-            if status == "PASS":
-                print(f"   ✅ Reviewer: 审核通过 (Logic: {metrics.get('plot_logic_score')}, Theme: {thematic_score})")
-                return "PASS"
-            else:
-                suggestion = result_data.get("suggestion", "请修改逻辑漏洞。")
-                print(f"   🚩 Reviewer: 发现隐患! -> {suggestion}")
-                return suggestion
+            # 增强的 PASS 逻辑: 即使 Status 是 PASS，如果分数过低也必须拦截 (Workflow 这一层做，这里只负责返回真实数据)
+            # 为了 Workflow 方便，我们将结构化数据嵌入 feedback 字符串，或者 Workflow 直接从 memory 读取 metrics?
+            # 更好的方式是 Workflow 这一层访问 metrics。但 NovelState.review_feedback 目前是字符串。
+            # 我们将在这里直接返回 JSON string，让 Workflow 解析，或者保持字符串但包含分数信息
+            
+            # 简单起见，我们返回 JSON 字符串作为 feedback，让 Workflow 去解析。
+            # 但 Workflow 目前预期的是 "PASS" string。
+            # 兼容性方案: 如果通过，返回 "PASS"。如果不通过，返回 JSON string。
+            # 可是 Workflow 想要做硬性熔断。
+            
+            # 修改策略：永远返回 JSON string，Workflow 负责解析。
+            return json.dumps(result_data, ensure_ascii=False)
 
         except json.JSONDecodeError:
             print(f"   ⚠️ Reviewer JSON 解析失败，回退到原始文本检查。")
             # Fallback simple check (if model failed to output JSON)
             if "PASS" in response and len(response) < 50:
-                return "PASS"
-            return response
+                return json.dumps({"status": "PASS", "suggestion": ""})
+            return json.dumps({"status": "BLOCK", "suggestion": response, "metrics": {}})
             
         except Exception as e:
             print(f"   ⚠️ Reviewer 审计中断: {e}")
-            return "PASS"
+            return json.dumps({"status": "PASS", "suggestion": "System Error Bypass"})

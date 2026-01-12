@@ -261,10 +261,34 @@ class ContextManager:
         )
 
         active_hooks = ""
-        if intent["needs_hooks"] or intent["type"] == "Investigation":
-            hooks = self.memory.get_active_foreshadowing()
-            if hooks:
-                active_hooks = "\n【当前活跃伏笔 (需重点关注)】:\n" + "\n".join([f"- {h['content']} (ID:{h['id']})" for h in hooks])
+        # 强制获取所有伏笔，进行分级筛选
+        all_hooks = self.memory.get_active_foreshadowing()
+        
+        mandatory_hooks = []
+        contextual_hooks = []
+        
+        for h in all_hooks:
+            # Importance >= 8: 核心伏笔，必须时刻提醒 (The "Sword of Damocles")
+            if h.get('importance', 5) >= 8:
+                mandatory_hooks.append(h)
+            # 否则，如果是侦探意图或 Intent 明确需要，加入上下文候选
+            elif intent["needs_hooks"] or intent["type"] == "Investigation":
+                contextual_hooks.append(h)
+                
+        # 组装文本
+        hook_lines = []
+        if mandatory_hooks:
+            hook_lines.append("‼️【核心悬念 (Core Mysteries) - 必须铭记】")
+            for h in mandatory_hooks:
+                hook_lines.append(f"- [ID:{h['id']}] {h['content']} (Imp:{h.get('importance')})")
+        
+        if contextual_hooks:
+            hook_lines.append("🔍【线索提示 (Clues)】")
+            for h in contextual_hooks:
+                hook_lines.append(f"- [ID:{h['id']}] {h['content']}")
+                
+        if hook_lines:
+            active_hooks = "\n" + "\n".join(hook_lines)
 
         state_text = f"""
 # 🌍 宏观状态

@@ -1276,10 +1276,10 @@ class MemoryManager:
     def get_active_foreshadowing(self) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT id, chapter_created, content FROM foreshadowing WHERE status = "active"')
+        cursor.execute('SELECT id, chapter_created, content, importance FROM foreshadowing WHERE status = "active"')
         rows = cursor.fetchall()
         conn.close()
-        return [{"id": r[0], "chapter": r[1], "content": r[2]} for r in rows]
+        return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3] if len(r) > 3 else 5} for r in rows]
 
     # --- 地理信息管理 (GIS) ---
 

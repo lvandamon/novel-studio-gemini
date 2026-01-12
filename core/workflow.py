@@ -152,7 +152,15 @@ class NovelWorkflow:
         
         # Add review feedback if re-drafting
         if state.get("review_feedback"):
-            context_package += f"\n\n⚠️【必须修正的问题】(来自上一轮审核):\n{state['review_feedback']}\n"
+            # Try parsing JSON feedback
+            try:
+                import json
+                fb_data = json.loads(state['review_feedback'])
+                suggestion = fb_data.get("suggestion", state['review_feedback'])
+                if suggestion:
+                    context_package += f"\n\n🛑【导演/审核驳回指令】(必须修正):\n{suggestion}\n"
+            except:
+                context_package += f"\n\n⚠️【必须修正的问题】(来自上一轮审核):\n{state['review_feedback']}\n"
         
         draft = self.writer.write_chapter(outline_str, context_package)
         state["draft_content"] = draft
@@ -211,19 +219,51 @@ class NovelWorkflow:
         return "reject"
 
     def check_review_status(self, state: NovelState) -> Literal["approve", "reject"]:
-        feedback = state.get("review_feedback", "")
+        import json
+        feedback_raw = state.get("review_feedback", "")
         revisions = state.get("revision_count", 0)
         
-        if "PASS" in feedback:
-            print("   ✅ 审核通过！")
-            return "approve"
-        
-        if revisions >= 2:
-            print("   ⚠️ 达到最大修改次数，强制通过（保留瑕疵）。")
-            return "approve" 
+        try:
+            feedback_data = json.loads(feedback_raw)
+        except:
+            # Fallback for legacy string format or error
+            if "PASS" in feedback_raw: return "approve"
+            return "reject"
             
-        print("   ❌ 审核未通过，发回重修。")
-        return "reject"
+        status = feedback_data.get("status", "BLOCK")
+        metrics = feedback_data.get("metrics", {})
+        
+        # --- DIRECTOR'S ROLLBACK AUTHORITY (熔断机制) ---
+        # 即使 Status 是 PASS，如果核心指标过低，强制驳回
+        logic_score = metrics.get("plot_logic_score", 100)
+        alignment_score = metrics.get("alignment_score", 100) # Director's Will
+        
+        threshold = 80 # 严格标准
+        
+        if revisions >= 3:
+            print("   ⚠️ 达到最大修改次数 (3)，强制通过（即使有瑕疵）。")
+            return "approve"
+
+        if status == "BLOCK":
+            print(f"   ❌ Reviewer 明确驳回: {feedback_data.get('suggestion')}")
+            return "reject"
+            
+        if logic_score < threshold:
+            print(f"   🛡️ 逻辑熔断 (Logic {logic_score} < {threshold}) -> 强制回滚！")
+            # 注入新的修改建议
+            feedback_data["suggestion"] = f"【系统强制驳回】逻辑分过低 ({logic_score})。请检查硬逻辑冲突。"
+            state["review_feedback"] = json.dumps(feedback_data, ensure_ascii=False)
+            return "reject"
+
+        if alignment_score < threshold:
+            print(f"   🎬 导演回滚 (Alignment {alignment_score} < {threshold}) -> 严重偏离叙事焦点！")
+             # 注入新的修改建议
+            feedback_data["suggestion"] = f"【导演强制驳回】你写偏了！({alignment_score})。请严格遵循 Narrative Focus (Goal/Beat)。"
+            state["review_feedback"] = json.dumps(feedback_data, ensure_ascii=False)
+            return "reject"
+            
+        print(f"   ✅ 审核通过 (Logic: {logic_score}, Alignment: {alignment_score})")
+        return "approve"
 
     def build_graph(self):
         workflow = StateGraph(NovelState)
