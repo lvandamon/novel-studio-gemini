@@ -35,27 +35,34 @@ class GraphManager:
         self._connect()
 
     def _connect(self):
-        """建立连接，如果失败则抛出异常，不再静默处理"""
+        """
+        🔥 P0修复: 建立连接,失败则进入降级模式(Graceful Degradation)
+        降级后所有图谱操作返回空结果,不中断流程
+        """
         try:
             if self.driver:
                 self.driver.close()
             self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.driver.verify_connectivity()
+            print("✅ Neo4j 连接成功")
         except Exception as e:
-            raise RuntimeError(f"❌ 无法连接到 Neo4j 数据库。200万字项目必须强制依赖图谱，请检查数据库状态: {e}")
+            print(f"⚠️ Neo4j 连接失败,进入降级模式(Degraded Mode): {e}")
+            print("   系统将继续运行,但关系图谱功能不可用。依赖纯向量+SQL记忆。")
+            self.driver = None  # 明确标记为不可用
 
     def close(self):
         if self.driver:
             self.driver.close()
 
     def is_connected(self) -> bool:
+        """检查连接状态"""
+        if not self.driver:
+            return False
         try:
-            if self.driver:
-                self.driver.verify_connectivity()
-                return True
+            self.driver.verify_connectivity()
+            return True
         except:
-            pass
-        return False
+            return False
         
     def _sanitize_label(self, label: str) -> str:
         clean = label.replace("`", "")
@@ -81,10 +88,12 @@ class GraphManager:
     @retry_neo4j()
     def add_event_node(self, event_uid: str, description: str, chapter: int, event_type: str = "Major"):
         """创建或更新事件节点"""
+        if not self.is_connected():
+            return  # 🔥 降级: 静默跳过
         query = """
         MERGE (e:Event {uid: $uid})
-        SET e.description = $desc, 
-            e.chapter = $chapter, 
+        SET e.description = $desc,
+            e.chapter = $chapter,
             e.type = $type,
             e.updated_at = timestamp()
         """
@@ -94,6 +103,8 @@ class GraphManager:
     @retry_neo4j()
     def add_causality(self, cause_event_uid: str, effect_event_uid: str, reason: str = ""):
         """记录因果链: (Event A) -[CAUSED]-> (Event B)"""
+        if not self.is_connected():
+            return  # 🔥 降级: 静默跳过
         query = """
         MATCH (a:Event {uid: $cause_uid})
         MATCH (b:Event {uid: $effect_uid})
@@ -106,6 +117,8 @@ class GraphManager:
     @retry_neo4j()
     def add_participation(self, character_name: str, event_uid: str, role: str):
         """记录角色参与事件: (Character) -[PARTICIPATED_IN {role: ...}]-> (Event)"""
+        if not self.is_connected():
+            return  # 🔥 降级: 静默跳过
         query = """
         MERGE (c:Character {name: $char_name})
         WITH c
@@ -187,6 +200,9 @@ class GraphManager:
     @retry_neo4j()
     def query_entity_context(self, entity_name: str, current_chapter: int = 999999) -> str:
         """查询在特定章节有效的实体上下文"""
+        if not self.is_connected():
+            return f"（知识图谱不可用，跳过关系查询）"  # 🔥 降级: 返回提示信息
+
         query = f"""
         MATCH (a {{name: $name}})-[r]-(b)
         WHERE (r.start_chapter IS NULL OR r.start_chapter <= $current_chapter)
@@ -194,7 +210,7 @@ class GraphManager:
         RETURN type(r) as rel, b.name as target, labels(b) as target_type, startNode(r) = a as is_outgoing, r.desc as desc
         LIMIT 50
         """
-        
+
         context_lines = []
         with self.driver.session() as session:
             result = session.run(query, name=entity_name, current_chapter=current_chapter)
@@ -202,7 +218,7 @@ class GraphManager:
                 rel_type = record["rel"]
                 target = record["target"]
                 desc = f" ({record['desc']})" if record["desc"] else ""
-                
+
                 if record["is_outgoing"]:
                     line = f"({entity_name}) --[{rel_type}]--> ({target}){desc}"
                 else:
@@ -211,7 +227,7 @@ class GraphManager:
 
         if not context_lines:
             return f"图谱中暂无关于 {entity_name} 的有效关系记录（截至第 {current_chapter} 章）。"
-            
+
         return "\n".join(context_lines)
 
     @retry_neo4j()
@@ -244,6 +260,9 @@ class GraphManager:
         针对多角色场景，提取它们之间错综复杂的关系网。
         不仅仅是两两之间的最短路径，还包含它们共同的重要邻居（中间人）。
         """
+        if not self.is_connected():
+            return "（知识图谱不可用，跳过多角色关系查询）"  # 🔥 降级
+
         if len(entities) < 2:
             return self.query_entity_context(entities[0]) if entities else ""
             

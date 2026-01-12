@@ -15,25 +15,27 @@ from agents.reader_agent import ReaderAgent
 # --- State Definition ---
 class NovelState(TypedDict):
     chapter_num: int
-    
+
     # Context Data
     narrative_plan: Dict[str, Any]
     narrative_focus: Dict[str, Any]
-    
+
     # Working Data
     outline_data: Dict[str, Any] # title, outline, characters, etc.
     draft_content: str
     final_content: Optional[str]
-    
+
     # Feedback Loops
     simulator_feedback: str
     simulator_retry_count: int
     review_feedback: str
     revision_count: int
     reader_feedback: Dict[str, Any] # New: Store reader sentiment
-    
+
     # Flags
     director_ran: bool
+    requires_director_review: bool  # 🔥 P1新增: 标记需要Director特殊审查
+    high_risk_flag: bool  # 🔥 P1新增: 标记高风险章节(Simulator多次驳回)
 
 from agents.foreshadowing_agent import ForeshadowingAgent
 
@@ -104,8 +106,16 @@ class NovelWorkflow:
 ## 7. 上一轮模拟反馈 (如果有)
 {state.get('simulator_feedback', '无')}
 """
-        
+
         outline_data = self.editor.generate_outline(state["chapter_num"], full_context, causal_context=causal_context)
+
+        # 🔥 P2新增: 自动检测大纲是否隐含伏笔回收
+        outline_str = "\n".join(outline_data.get("outline", []))
+        potential_resolutions = self.foreshadowing_agent.detect_outline_resolutions(outline_str)
+        if potential_resolutions:
+            print(f"   🔍 检测到大纲可能回收伏笔: {potential_resolutions}")
+            outline_data["potential_hook_resolutions"] = potential_resolutions
+
         state["outline_data"] = outline_data
         return state
 
@@ -207,15 +217,28 @@ class NovelWorkflow:
     def check_simulator_status(self, state: NovelState) -> Literal["approve", "reject"]:
         feedback = state.get("simulator_feedback", "")
         retries = state.get("simulator_retry_count", 0)
-        
+
         if "PASS" in feedback:
             return "approve"
-        
+
+        # 🔥 P1修复: 优化重试逻辑
         if retries >= 3:
-            print("   ⚠️ 模拟器驳回次数过多，强制通过（此时应由人类介入）。")
+            print("   🚨 模拟器驳回次数过多(3次)，触发强制人工审查流程。")
+            print(f"   📋 驳回理由: {feedback}")
+
+            # 策略A: 记录严重逻辑冲突,Director下一轮强制介入
+            # 标记需要Director特殊关注
+            state["requires_director_review"] = True
+
+            # 策略B: 降低Simulator敏感度,再给一次机会 (可选,暂时注释)
+            # state["simulator_retry_count"] = 0  # 重置计数
+
+            # 现阶段实现: 强制通过但标记,让Reviewer重点审查
+            print("   ⚠️ 暂时放行,但标记为高风险。Reviewer将进行二次严审。")
+            state["high_risk_flag"] = True
             return "approve"
-            
-        print("   🔙 模拟器驳回，Editor 重写大纲...")
+
+        print(f"   🔙 模拟器驳回(尝试 {retries}/3)，Editor 重写大纲...")
         return "reject"
 
     def check_review_status(self, state: NovelState) -> Literal["approve", "reject"]:

@@ -43,8 +43,18 @@ class SimulatorAgent:
         # C. 心理档案 (Mental Profile)
         basic_info = self.memory.get_character_details(active_characters, query="Simulator Check")
         mental_curves = self.memory.get_character_mental_curve(active_characters, limit=5)
-        
+
+        # 🔥 P1修复: 强制注入黄金锚点 (Golden Anchors)
+        anchors_text = ""
+        for char in active_characters:
+            anchor = self.memory.get_character_anchors(char)
+            if anchor:
+                anchors_text += f"{anchor}\n"
+
         profile_text = f"""
+=== ⚓️ 黄金锚点 (Immutable Anchors) - 最高优先级 ===
+{anchors_text if anchors_text else "（无特殊锚点）"}
+
 === 基础档案 ===
 {basic_info}
 

@@ -103,33 +103,70 @@ class ForeshadowingAgent:
         # Top 3 suggestions
         return "🔮 伏笔雷达 (Top Priority)：\n" + "\n".join(suggestions[:5])
 
+    def detect_outline_resolutions(self, outline: str) -> List[int]:
+        """
+        🔥 P2新增: 自动检测大纲中是否隐含伏笔回收
+        通过关键词匹配+语义分析判断
+
+        Returns:
+            List[int]: 可能被回收的伏笔ID列表
+        """
+        active_hooks = self.memory.get_active_foreshadowing()
+        if not active_hooks:
+            return []
+
+        potential_resolutions = []
+
+        for hook in active_hooks:
+            hook_id = hook['id']
+            hook_content = hook['content']
+
+            # 策略1: 关键词匹配 (简单快速)
+            # 提取伏笔中的关键实体 - 改进版:按字拆分(中文友好)
+            import re
+            # 提取2-4字的词组作为关键词
+            keywords = []
+            for i in range(len(hook_content) - 1):
+                for j in range(i+2, min(i+5, len(hook_content)+1)):
+                    word = hook_content[i:j]
+                    if len(word) >= 2 and word.strip():
+                        keywords.append(word)
+
+            # 如果大纲中多次提及伏笔关键词,可能是回收信号
+            # 降低阈值到至少1个关键词命中
+            matches = sum(1 for kw in keywords if kw in outline)
+            if matches >= 1:  # 至少1个关键词命中
+                potential_resolutions.append(hook_id)
+
+        return potential_resolutions
+
     def analyze_hooks(self, content: str, chapter_num: int) -> dict:
         """分析并更新伏笔 (每章结束运行)"""
         print(f"🔮 伏笔猎人 (Foreshadowing) 正在分析线索...")
-        
+
         # 1. 获取当前活跃伏笔
         active_hooks = self.memory.get_active_foreshadowing()
         hooks_str = json.dumps(active_hooks, ensure_ascii=False) if active_hooks else "暂无活跃伏笔"
-        
+
         # 2. 调用 LLM
         raw_output = self.chain.invoke({
             "content": content,
             "active_hooks": hooks_str
         })
-        
+
         # 3. 解析 JSON
         try:
             # 清理可能的 markdown
             json_str = raw_output.replace("```json", "").replace("```", "").strip()
             # 简单修复
-            json_str = json_str.replace(",\n}", "\n}") 
-            
+            json_str = json_str.replace(",\n}", "\n}")
+
             data = json.loads(json_str)
-            
+
             # 4. 执行数据库更新
             new_clues = data.get("new_clues", [])
             resolved_ids = data.get("resolved_clue_ids", [])
-            
+
             # 新增
             for clue in new_clues:
                 if isinstance(clue, dict):
@@ -140,17 +177,17 @@ class ForeshadowingAgent:
                     content_str = str(clue)
                     importance = 5
                     tags = []
-                    
+
                 self.memory.add_foreshadowing(chapter_num, content_str, importance, tags)
                 print(f"   -> 📌 埋下新伏笔 (Imp:{importance}): {content_str[:20]}...")
-            
+
             # 回收
             for clue_id in resolved_ids:
                 self.memory.resolve_foreshadowing(clue_id, chapter_num)
                 print(f"   -> ✅ 回收伏笔 ID: {clue_id}")
-                
+
             return data
-            
+
         except Exception as e:
             print(f"⚠️ 伏笔分析出错: {e}")
             return {}

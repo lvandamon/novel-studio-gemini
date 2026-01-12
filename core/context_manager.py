@@ -29,20 +29,28 @@ class ContextManager:
             self.encoder = tiktoken.encoding_for_model(model_name)
         except:
             self.encoder = tiktoken.get_encoding("cl100k_base")
-            
-        # 默认总预算 (32k for deepseek-v3/r1 long context)
-        self.total_budget = 32000 
-        
-        # 基础层预算 (硬性保留)
+
+        # 🔥 P0修复: 扩大总预算至64k (适配200万字长篇后期需求)
+        self.total_budget = 64000
+
+        # 基础层预算 (硬性保留) - 同步扩容
         self.base_budgets = {
-            "global": 4000,
-            "local_roster": 3000,
-            "prev_summary": 2000,
-            "vocabulary": 1000,
+            "global": 6000,  # 扩容50%
+            "local_roster": 4000,
+            "prev_summary": 3000,
+            "vocabulary": 1500,
         }
-        
+
+        # 🆕 层级缓存系统 (Hierarchical Cache)
+        # 用于缓存不常变化的全局内容 (世界圣经、卷级规划)
+        self._cache = {
+            "world_bible": {"content": None, "chapter": -1},  # 每10章刷新
+            "volume_plan": {"content": None, "volume_id": None},  # 卷切换时刷新
+            "vocabulary": {"content": None, "arc_name": None}  # 单元切换时刷新
+        }
+
         # 初始化 LLM 链
-        self.llm = get_deepseek_chat(temperature=0.1) 
+        self.llm = get_deepseek_chat(temperature=0.1)
         self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
         self.compressor_chain = CONTEXT_COMPRESSION_PROMPT | self.llm | StrOutputParser()
 
@@ -104,18 +112,37 @@ class ContextManager:
             print(f"   ⚠️ Compression Failed: {e}. Fallback to trim.")
             return self._trim_lines_to_budget(content, budget)
 
+    def _get_cached_or_build(self, cache_key: str, build_func, invalidate_check) -> str:
+        """
+        🆕 缓存辅助函数: 检查缓存是否有效,无效则重建
+
+        Args:
+            cache_key: 缓存键名
+            build_func: 无参构建函数
+            invalidate_check: 返回是否失效的函数
+        """
+        cache_entry = self._cache.get(cache_key)
+        if cache_entry and cache_entry["content"] is not None and not invalidate_check(cache_entry):
+            return cache_entry["content"]
+
+        # 缓存失效,重建
+        content = build_func()
+        self._cache[cache_key]["content"] = content
+        return content
+
     def _build_vocabulary_constraints(self, volume_name: str, arc_name: str) -> str:
         """
         构建动态词表约束 (Dynamic Vocabulary Constraints)。
-        从世界圣经中检索当前阶段的禁词、推荐词。
+        🔥 P0修复: 使用缓存减少重复检索
         """
-        # 检索 Terminology 相关的圣经条目
-        vocab_context = self.memory.get_bible_context(query=f"{volume_name} {arc_name} 术语 词汇 禁忌语")
-        
-        # 基础通用约束 (Hardcoded Baseline)
-        baseline = """
+        def build():
+            # 检索 Terminology 相关的圣经条目
+            vocab_context = self.memory.get_bible_context(query=f"{volume_name} {arc_name} 术语 词汇 禁忌语")
+
+            # 基础通用约束 (Hardcoded Baseline)
+            baseline = """
 ### 🚫 词汇禁区 (Vocabulary Taboos)
-- 严禁出现现代科技词汇 (如: 信号, 逻辑, 降维打击, 量子, 甚至“思考方式”等现代口语)。
+- 严禁出现现代科技词汇 (如: 信号, 逻辑, 降维打击, 量子, 甚至"思考方式"等现代口语)。
 - 严禁出现 OOC 网络热词。
 - 严禁出现非本世界观的计量单位 (除非圣经另有规定)。
 
@@ -123,9 +150,16 @@ class ContextManager:
 - 使用古雅、稳重的半文言或正统网文仙侠笔触。
 - 动作描写优先使用具体的武学方位和劲力描述。
 """
-        if vocab_context:
-            return f"{baseline}\n### 🌍 当前阶段特定词表:\n{vocab_context}"
-        return baseline
+            if vocab_context:
+                return f"{baseline}\n### 🌍 当前阶段特定词表:\n{vocab_context}"
+            return baseline
+
+        def check_invalid(entry):
+            return entry.get("arc_name") != arc_name
+
+        result = self._get_cached_or_build("vocabulary", build, check_invalid)
+        self._cache["vocabulary"]["arc_name"] = arc_name
+        return result
 
     def build_director_context(self, chapter_num: int) -> str:
         """
@@ -311,10 +345,16 @@ class ContextManager:
         # --- 3. Targeted Retrieval (定向检索层 - 智能压缩区) ---
         
         # A. 角色状态
+        # 🔥 P1修复: 强制注入黄金锚点 (确保Writer严格遵守人设)
         char_info = "# 👥 角色实时状态\n"
         for char_name in active_characters:
+            # 先插入锚点
+            anchors = self.memory.get_character_anchors(char_name)
+            if anchors:
+                char_info += f"## {char_name} - 黄金锚点 (绝对不可违背)\n{anchors}\n\n"
+
             details = self.memory.get_character_details([char_name], query=outline)
-            char_info += f"## {char_name}\n{details}\n"
+            char_info += f"## {char_name} - 当前状态\n{details}\n"
         
         # B. 关系深度检索 (Subgraph Extraction)
         graph_info = ""

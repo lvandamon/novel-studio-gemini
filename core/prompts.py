@@ -302,15 +302,15 @@ REVIEWER_SYSTEM_PROMPT = """你是由“清风揽岳”人格化身的毒舌书�
    ```
    """
    
-   REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages(
-       [
-           ("system", REVIEWER_SYSTEM_PROMPT),
-           (
-               "user",
-               "\n    【当前叙事焦点 (Director's Intent)】：\n    {narrative_focus}\n\n    【核心母题 (Current Theme)】：\n    {current_theme}\n\n    【角色核心人设 (Anchors & Mental)】：\n    {character_anchors}\n    {mental_states}\n\n    【历史设定/相关记忆】：\n    {memory_context}\n\n    【待审核内容】：\n    {content}\n\n    请开始审核。\n    ",
-           ),
-       ]
-   )
+REVIEWER_CHECK_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", REVIEWER_SYSTEM_PROMPT),
+        (
+            "user",
+            "\n    【当前叙事焦点 (Director's Intent)】：\n    {narrative_focus}\n\n    【核心母题 (Current Theme)】：\n    {current_theme}\n\n    【角色核心人设 (Anchors & Mental)】：\n    {character_anchors}\n    {mental_states}\n\n    【历史设定/相关记忆】：\n    {memory_context}\n\n    【待审核内容】：\n    {content}\n\n    请开始审核。\n    ",
+        ),
+    ]
+)
 
 # --- Archivist Agent (DeepSeek-V3) Prompts ---
 
