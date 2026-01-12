@@ -60,18 +60,37 @@ class NovelWorkflow:
         """Node 1: Director Check (Strategic Control)"""
         current_chapter = state["chapter_num"]
         
-        # Policy: Run Director every 5 chapters OR first chapter
-        if current_chapter % 5 == 0 or current_chapter == 1:
-            print(f"\n🎥 === Workflow: Director Activation (Ch {current_chapter}) ===")
+        # 🔥 P1优化: 动态Director频率
+        # 前100章: 每5章 | 100-500章: 每10章 | 500+章: 每15章
+        if current_chapter <= 100:
+            director_interval = 5
+        elif current_chapter <= 500:
+            director_interval = 10
+        else:
+            director_interval = 15
+
+        # Policy: Run Director on interval OR first chapter
+        if current_chapter % director_interval == 0 or current_chapter == 1:
+            print(f"\n🎥 === Workflow: Director Activation (Ch {current_chapter}, 周期:{director_interval}章) ===")
             self.director.evaluate_progress(current_chapter)
             state["director_ran"] = True
         else:
             state["director_ran"] = False
-            
+
         # Refresh context from DB (Director might have changed it)
         state["narrative_plan"] = self.memory.get_active_plan()
         state["narrative_focus"] = self.memory.get_narrative_focus()
-        
+
+        # 🔥 P2新增: 伏笔健康度自动检查(每10章)
+        if current_chapter % 10 == 0:
+            from agents.foreshadowing_agent import ForeshadowingAgent
+            hook_agent = ForeshadowingAgent(self.memory)
+            dying_hooks = hook_agent.check_hook_health(current_chapter)
+            if dying_hooks:
+                print(f"\n⚠️  伏笔健康预警: 发现 {len(dying_hooks)} 个待回收伏笔")
+                for hook in dying_hooks[:3]:  # 只显示前3个
+                    print(f"   - ID:{hook['id']} (Imp:{hook['importance']}, Gap:{hook['gap']}章) {hook['content'][:30]}...")
+
         return state
 
     def node_editor_gen(self, state: NovelState) -> NovelState:

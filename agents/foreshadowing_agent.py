@@ -105,8 +105,12 @@ class ForeshadowingAgent:
 
     def detect_outline_resolutions(self, outline: str) -> List[int]:
         """
-        🔥 P2新增: 自动检测大纲中是否隐含伏笔回收
-        通过关键词匹配+语义分析判断
+        🔥 P1升级: 语义嵌入匹配 + 关键词双重验证
+
+        策略:
+        1. 使用嵌入向量计算语义相似度 (主要判断)
+        2. 关键词匹配作为辅助验证
+        3. 综合评分决定是否回收
 
         Returns:
             List[int]: 可能被回收的伏笔ID列表
@@ -117,26 +121,60 @@ class ForeshadowingAgent:
 
         potential_resolutions = []
 
+        # 🔥 P1新增: 生成大纲嵌入向量
+        try:
+            from langchain_core.documents import Document
+            outline_doc = Document(page_content=outline)
+            outline_embedding = self.memory.embeddings.embed_query(outline)
+        except Exception as e:
+            print(f"   ⚠️ 嵌入生成失败,回退到关键词匹配: {e}")
+            outline_embedding = None
+
         for hook in active_hooks:
             hook_id = hook['id']
             hook_content = hook['content']
+            score = 0.0
 
-            # 策略1: 关键词匹配 (简单快速)
-            # 提取伏笔中的关键实体 - 改进版:按字拆分(中文友好)
+            # 策略1: 语义相似度 (60分)
+            if outline_embedding:
+                try:
+                    hook_embedding = self.memory.embeddings.embed_query(hook_content)
+                    # 计算余弦相似度
+                    import numpy as np
+                    similarity = np.dot(outline_embedding, hook_embedding) / (
+                        np.linalg.norm(outline_embedding) * np.linalg.norm(hook_embedding)
+                    )
+                    # 相似度>0.75认为高度相关
+                    if similarity > 0.75:
+                        score += 60
+                    elif similarity > 0.65:
+                        score += 40
+                    elif similarity > 0.55:
+                        score += 20
+                except Exception:
+                    pass
+
+            # 策略2: 关键词匹配 (40分)
+            # 提取核心实体(人名/物品名等)
             import re
-            # 提取2-4字的词组作为关键词
-            keywords = []
+            # 提取2-4字的词组
+            keywords = set()
             for i in range(len(hook_content) - 1):
                 for j in range(i+2, min(i+5, len(hook_content)+1)):
                     word = hook_content[i:j]
                     if len(word) >= 2 and word.strip():
-                        keywords.append(word)
+                        keywords.add(word)
 
-            # 如果大纲中多次提及伏笔关键词,可能是回收信号
-            # 降低阈值到至少1个关键词命中
+            # 计算命中率
             matches = sum(1 for kw in keywords if kw in outline)
-            if matches >= 1:  # 至少1个关键词命中
+            if keywords:
+                match_rate = matches / len(keywords)
+                score += match_rate * 40
+
+            # 综合判断: 得分>50认为可能回收
+            if score >= 50:
                 potential_resolutions.append(hook_id)
+                print(f"   🎯 检测到可能回收伏笔 ID:{hook_id} (Score:{score:.1f})")
 
         return potential_resolutions
 

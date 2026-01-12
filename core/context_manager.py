@@ -216,6 +216,57 @@ class ContextManager:
 {recent_history}
 """
 
+    def _rank_characters_by_priority(self, characters: List[str], chapter_num: int, outline: str) -> List[str]:
+        """
+        🔥 P1新增: 角色优先级评估算法
+
+        评分维度:
+        1. 大纲提及次数 (30%)
+        2. 重要性等级 (25%)
+        3. 近期活跃度 (25%)
+        4. 主角标记 (20%)
+
+        Returns:
+            按优先级降序排列的角色列表
+        """
+        scores = {}
+
+        for char_name in characters:
+            score = 0.0
+
+            # 1. 大纲提及次数 (强相关性)
+            mentions = outline.count(char_name)
+            score += min(mentions * 10, 30)  # 上限30分
+
+            # 2. 重要性等级
+            char = self.memory.get_character(char_name)
+            if char:
+                importance = char.get('importance', 5)  # 1-10
+                score += (importance / 10) * 25
+
+                # 3. 近期活跃度 (最近10章出现次数)
+                recent_chapters = max(1, chapter_num - 10)
+                # 简化: 查询近期事件
+                conn = self.memory._get_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM events
+                    WHERE character_name = ? AND chapter_num >= ?
+                ''', (char_name, recent_chapters))
+                recent_events = cursor.fetchone()[0]
+                conn.close()
+                score += min(recent_events * 2.5, 25)
+
+                # 4. 主角标记
+                if char.get('is_protagonist', False):
+                    score += 20
+
+            scores[char_name] = score
+
+        # 按分数降序排序
+        ranked = sorted(scores.items(), key=lambda x: -x[1])
+        return [name for name, _ in ranked]
+
     def _analyze_plot_intent(self, outline: str) -> Dict[str, Any]:
         """
         [核心逻辑升级] AI 意图解析器
@@ -344,10 +395,22 @@ class ContextManager:
 
         # --- 3. Targeted Retrieval (定向检索层 - 智能压缩区) ---
         
-        # A. 角色状态
-        # 🔥 P1修复: 强制注入黄金锚点 (确保Writer严格遵守人设)
+        # A. 角色状态 - 🔥 P1优化: 动态优先级分配
+        # 当角色数量>5时,按重要性+活跃度排序,只保留Top5详情
         char_info = "# 👥 角色实时状态\n"
-        for char_name in active_characters:
+
+        # 🔥 P1新增: 角色优先级评估
+        if len(active_characters) > 5:
+            print(f"   ⚠️ 角色数过多({len(active_characters)}), 启动优先级筛选...")
+            ranked_chars = self._rank_characters_by_priority(active_characters, chapter_num, outline)
+            primary_chars = ranked_chars[:5]  # Top5详情
+            secondary_chars = ranked_chars[5:]  # 其他简化
+        else:
+            primary_chars = active_characters
+            secondary_chars = []
+
+        # 主要角色: 完整信息
+        for char_name in primary_chars:
             # 先插入锚点
             anchors = self.memory.get_character_anchors(char_name)
             if anchors:
@@ -355,15 +418,31 @@ class ContextManager:
 
             details = self.memory.get_character_details([char_name], query=outline)
             char_info += f"## {char_name} - 当前状态\n{details}\n"
+
+        # 次要角色: 一句话摘要
+        if secondary_chars:
+            char_info += "\n## 其他在场角色 (简要)\n"
+            for char_name in secondary_chars:
+                char = self.memory.get_character(char_name)
+                if char:
+                    level = char.get('level', '未知')
+                    trait = char.get('personality_trait', '').split(',')[0] if char.get('personality_trait') else '普通'
+                    char_info += f"- **{char_name}** [{level}] - {trait}\n"
         
-        # B. 关系深度检索 (Subgraph Extraction)
+        # B. 关系深度检索 (Subgraph Extraction) - 🔥 P0优化: 传递章节参数
         graph_info = ""
         if intent["needs_relations"] or intent["type"] == "Social" or len(active_characters) > 1:
-            graph_info = self.memory.graph.get_multi_entity_relationships(active_characters)
+            graph_info = self.memory.graph.get_multi_entity_relationships(
+                active_characters,
+                current_chapter=chapter_num  # 🔥 启用时间窗口优化
+            )
         else:
             # 单人场景或无复杂关系，只查简单的邻居
             for char_name in active_characters:
-                 neighbors = self.memory.graph.query_entity_context(char_name, current_chapter=chapter_num)
+                 neighbors = self.memory.graph.query_entity_context(
+                     char_name,
+                     current_chapter=chapter_num  # 🔥 启用时间窗口优化
+                 )
                  if "暂无" not in neighbors:
                      graph_info += f"## {char_name} 的周边关系\n{neighbors}\n"
         

@@ -5,6 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from core.llm import get_deepseek_reasoner
 from core.prompts import REVIEWER_CHECK_PROMPT
 from core.memory import MemoryManager
+from core.physics_validator import PhysicsValidator  # 🔥 P1新增
 
 class ReviewerAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -12,6 +13,7 @@ class ReviewerAgent:
         self.llm = get_deepseek_reasoner()
         self.chain = REVIEWER_CHECK_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
+        self.physics_validator = PhysicsValidator(memory_manager)  # 🔥 P1新增
 
     def _clean_json(self, text: str) -> str:
         # Remove <think> blocks
@@ -55,6 +57,26 @@ class ReviewerAgent:
 
         if not anchors_text: anchors_text = "（无活跃角色的特殊黄金锚点）"
 
+        # 🔥 P1新增: 物理约束验证
+        physics_violations = self.physics_validator.validate_draft(
+            content, active_characters, chapter_num
+        )
+        physics_report = self.physics_validator.generate_validation_report(physics_violations)
+
+        # 如果有致命违规,直接拦截
+        critical_violations = [v for v in physics_violations if v['severity'] == 'CRITICAL']
+        if critical_violations:
+            print(f"   🔴 检测到 {len(critical_violations)} 个致命物理违规,强制拦截!")
+            return json.dumps({
+                "status": "BLOCK",
+                "suggestion": physics_report,
+                "metrics": {
+                    "physics_violation_count": len(physics_violations),
+                    "plot_logic_score": 0,
+                    "alignment_score": 0
+                }
+            })
+
         try:
             full_context = f"""
 {bible_context}
@@ -64,6 +86,9 @@ class ReviewerAgent:
 
 【历史记忆】
 {memory_context}
+
+【物理约束验证】
+{physics_report}
 """
             # Format Narrative Focus
             focus_text = f"""
