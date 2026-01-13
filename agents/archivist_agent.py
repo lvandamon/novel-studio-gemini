@@ -278,11 +278,12 @@ class ArchivistAgent:
                 self.memory.resolve_foreshadowing(hook_id, chapter_num)
                 print(f"   ✅ 伏笔回收: ID {hook_id}")
 
-            # 7. 更新知识图谱
+            # 7. 更新知识图谱 + SQLite备份
             if extraction.relationships:
                 for trip in extraction.relationships:
-                    # trip is a GraphTripletSchema object (Pydantic model) 
-                    
+                    # trip is a GraphTripletSchema object (Pydantic model)
+
+                    # 写入 Neo4j (可能失败)
                     self.memory.graph.update_relationship(
                         source=trip.source,
                         source_type=trip.source_type,
@@ -293,6 +294,19 @@ class ArchivistAgent:
                         is_negated=trip.is_negated,
                         chapter_num=chapter_num
                     )
+
+                    # 🔥 P0新增: 同时写入 SQLite 备份
+                    self.memory.backup_relationship(
+                        source=trip.source,
+                        source_type=trip.source_type,
+                        relation=trip.relation,
+                        target=trip.target,
+                        target_type=trip.target_type,
+                        chapter_num=chapter_num,
+                        description=trip.desc,
+                        is_negated=trip.is_negated
+                    )
+
                     action = "❌删除" if trip.is_negated else "🔗连接"
                     print(f"   🕸️ 图谱{action}: {trip.source} --{trip.relation}--> {trip.target}")
             

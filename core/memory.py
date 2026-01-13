@@ -131,6 +131,12 @@ class MemoryManager:
                 status TEXT DEFAULT 'active',
                 chapter_resolved INTEGER,
                 notes TEXT,
+                -- 🔥 P0新增: 人工确认队列
+                pending_resolution BOOLEAN DEFAULT 0, -- 是否待人工确认回收
+                resolution_chapter_proposed INTEGER, -- 系统提议的回收章节
+                resolution_confidence REAL DEFAULT 0, -- 系统检测的置信度 (0-1)
+                human_reviewed BOOLEAN DEFAULT 0, -- 是否已人工审核
+                human_approved BOOLEAN, -- 人工审核结果 (NULL=未审核, 1=确认回收, 0=驳回)
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -146,19 +152,28 @@ class MemoryManager:
                 current_conflict TEXT,
                 current_theme TEXT DEFAULT '成长', -- 新增：当前卷/单元的核心母题
                 thematic_echo_count INTEGER DEFAULT 0, -- 新增：母题回响计数
+                -- 🔥 P2新增: 母题衰减机制
+                last_echo_chapter INTEGER DEFAULT 0, -- 最后一次回响的章节
+                arc_start_chapter INTEGER DEFAULT 1, -- 当前单元开始章节 (用于按单元重置)
                 world_state_summary TEXT,
                 chapters_since_last_beat INTEGER DEFAULT 0,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 current_date TEXT DEFAULT '天道历元年1月1日'
             )
         ''')
-        
+
         # 自动迁移：检查是否存在新字段，不存在则添加 (Simple Migration)
         try:
             cursor.execute('ALTER TABLE narrative_focus ADD COLUMN current_theme TEXT DEFAULT "成长"')
         except: pass
         try:
             cursor.execute('ALTER TABLE narrative_focus ADD COLUMN thematic_echo_count INTEGER DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE narrative_focus ADD COLUMN last_echo_chapter INTEGER DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE narrative_focus ADD COLUMN arc_start_chapter INTEGER DEFAULT 1')
         except: pass
 
         # 卷管理表
@@ -217,7 +232,12 @@ class MemoryManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 category TEXT, -- 'Action', 'Scenery', 'Dialogue', 'InnerMonologue'
                 content TEXT,
-                notes TEXT
+                notes TEXT,
+                -- 🔥 P2新增: 自动学习支持
+                source TEXT DEFAULT 'manual', -- 'manual' | 'auto_learned'
+                quality_score REAL DEFAULT 0, -- 质量评分 (0-100)
+                source_chapter INTEGER, -- 来源章节
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
@@ -282,6 +302,39 @@ class MemoryManager:
             )
         ''')
 
+        # 🔥 P0新增: 关系备份表 (Neo4j Fallback)
+        # 当Neo4j不可用时，使用此表存储简化的关系信息
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS relationship_backup (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_name TEXT NOT NULL,
+                source_type TEXT DEFAULT 'Character',
+                relation TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                target_type TEXT DEFAULT 'Character',
+                description TEXT,
+                start_chapter INTEGER,
+                end_chapter INTEGER,  -- NULL表示关系仍有效
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_name, relation, target_name, start_chapter)
+            )
+        ''')
+
+        # 🔥 P0新增: 事件备份表 (Neo4j Fallback)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS event_backup (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_uid TEXT UNIQUE NOT NULL,
+                description TEXT,
+                chapter INTEGER,
+                event_type TEXT DEFAULT 'Major',
+                participants TEXT,  -- JSON: ["角色1", "角色2"]
+                cause_event_uid TEXT,  -- 因果链: 上游事件
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # 🔥 P0优化: 创建高频查询索引
         print("   📊 正在创建性能优化索引...")
 
@@ -312,6 +365,17 @@ class MemoryManager:
         ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_volumes_status ON volumes(status)
+        ''')
+
+        # 5. 🔥 P0新增: 关系备份索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_rel_backup_source ON relationship_backup(source_name, end_chapter)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_rel_backup_target ON relationship_backup(target_name, end_chapter)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_event_backup_chapter ON event_backup(chapter)
         ''')
 
         print("   ✅ 索引创建完成")
@@ -453,37 +517,141 @@ class MemoryManager:
 
     def get_style_examples(self, tags: List[str] = None, limit: int = 3) -> str:
         """
-        获取文风样板 (Style Guide).
-        Context-Aware: 根据传入的 tags (如 ['Dark', 'Action']) 检索对应类别的样板。
+        🔥 P2升级: 获取文风样板 (Style Guide)
+        优先从自动学习的高分章节中获取，其次是手动添加的样板
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         rows = []
+
+        # 🔥 P2新增: 优先从自动学习的样板中获取
         if tags:
-            # 尝试匹配 tags 对应的 category
-            # 动态构建 SQL
             placeholders = ','.join(['?'] * len(tags))
-            # 优先匹配
-            sql = f"SELECT category, content FROM style_guide WHERE category IN ({placeholders}) ORDER BY RANDOM() LIMIT ?"
+            sql = f"""
+                SELECT category, content FROM style_guide
+                WHERE category IN ({placeholders}) AND source = 'auto_learned'
+                ORDER BY quality_score DESC, RANDOM()
+                LIMIT ?
+            """
             params = list(tags) + [limit]
             cursor.execute(sql, params)
             rows = cursor.fetchall()
 
-        # 如果没有找到，或者没提供 tags，尝试获取 'General' 或 'Narrative' 作为默认
+        # 如果自动学习的不够，补充手动添加的
+        if len(rows) < limit and tags:
+            remaining = limit - len(rows)
+            placeholders = ','.join(['?'] * len(tags))
+            sql = f"""
+                SELECT category, content FROM style_guide
+                WHERE category IN ({placeholders}) AND (source IS NULL OR source = 'manual')
+                ORDER BY RANDOM()
+                LIMIT ?
+            """
+            params = list(tags) + [remaining]
+            cursor.execute(sql, params)
+            rows.extend(cursor.fetchall())
+
+        # 如果没有找到，或者没提供 tags，尝试获取默认
         if not rows:
-            cursor.execute("SELECT category, content FROM style_guide WHERE category IN ('General', 'Narrative', 'Default') ORDER BY RANDOM() LIMIT ?", (limit,))
+            cursor.execute("""
+                SELECT category, content FROM style_guide
+                WHERE category IN ('General', 'Narrative', 'Default')
+                ORDER BY COALESCE(quality_score, 0) DESC, RANDOM()
+                LIMIT ?
+            """, (limit,))
             rows = cursor.fetchall()
-            
+
         conn.close()
-        
+
         if not rows: return ""
-        
+
         lines = ["# 🖋️ 文风参考 (Style Reference) - 请模仿以下笔触"]
         for cat, content in rows:
             lines.append(f"--- [Example: {cat}] ---\n{content}")
-        
+
         return "\n".join(lines)
+
+    def auto_learn_style_from_chapter(self, chapter_num: int, content: str, metrics: Dict[str, Any]):
+        """
+        🔥 P2新增: 自动从高分章节学习文风样板
+
+        触发条件:
+        - 该章节的 pacing_score >= 80 且 tension >= 70 (优秀战斗)
+        - 或 thematic_score >= 80 (优秀情感/主题)
+        - 或 character_consistency_score >= 90 (优秀人设)
+
+        提取策略:
+        - 提取该章节的精彩段落 (200-400字)
+        - 自动打标签 (Action/Dialogue/InnerMonologue等)
+        """
+        pacing = metrics.get('pacing_score', 0)
+        tension = metrics.get('tension', 0)
+        thematic = metrics.get('thematic_score', 0)
+        consistency = metrics.get('character_consistency_score', 0)
+
+        # 判断是否值得学习
+        should_learn = False
+        categories = []
+        quality_score = 0
+
+        if pacing >= 80 and tension >= 70:
+            should_learn = True
+            categories.append('Action')
+            quality_score = max(quality_score, (pacing + tension) / 2)
+
+        if thematic >= 80:
+            should_learn = True
+            categories.append('InnerMonologue')
+            categories.append('Philosophy')
+            quality_score = max(quality_score, thematic)
+
+        if consistency >= 90:
+            should_learn = True
+            categories.append('Dialogue')
+            quality_score = max(quality_score, consistency)
+
+        if not should_learn:
+            return
+
+        print(f"   📚 自动学习: 第{chapter_num}章达到优秀标准，提取文风样板...")
+
+        # 提取精彩段落 (选择中间偏后的段落，通常是高潮部分)
+        paragraphs = content.split('\n\n')
+        if len(paragraphs) < 3:
+            return
+
+        # 选择中间到后半部分的段落
+        start_idx = len(paragraphs) // 3
+        end_idx = min(start_idx + 3, len(paragraphs))
+        selected_paragraphs = paragraphs[start_idx:end_idx]
+
+        # 过滤太短的段落
+        selected_paragraphs = [p for p in selected_paragraphs if len(p) >= 100]
+        if not selected_paragraphs:
+            return
+
+        # 取最长的一个作为样板
+        best_paragraph = max(selected_paragraphs, key=len)
+
+        # 限制长度
+        if len(best_paragraph) > 500:
+            best_paragraph = best_paragraph[:500] + "..."
+
+        # 存储到数据库
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        for category in categories:
+            cursor.execute('''
+                INSERT INTO style_guide (category, content, source, quality_score, source_chapter)
+                VALUES (?, ?, 'auto_learned', ?, ?)
+            ''', (category, best_paragraph, quality_score, chapter_num))
+
+        conn.commit()
+        conn.close()
+
+        print(f"      -> 已提取 {len(categories)} 个类别的样板 (质量分: {quality_score:.1f})")
 
     # --- 世界圣经 (World Bible / Immutable Truths) ---
 
@@ -1104,12 +1272,144 @@ class MemoryManager:
                 "echo_count": row[9] if len(row) > 9 else 0
             }
         return {
-            "volume": "序章", "arc": "引导篇", "beat": "背景铺垫", "goal": "确立主角身份", 
-            "conflict": "生存危机", "state": "一切尚未开始。", 
+            "volume": "序章", "arc": "引导篇", "beat": "背景铺垫", "goal": "确立主角身份",
+            "conflict": "生存危机", "state": "一切尚未开始。",
             "chapters_since_last_beat": 0,
             "date": "天道历元年1月1日",
             "theme": "生存",
-            "echo_count": 0
+            "echo_count": 0,
+            "last_echo_chapter": 0,
+            "arc_start_chapter": 1
+        }
+
+    def get_effective_echo_count(self, current_chapter: int) -> float:
+        """
+        🔥 P2新增: 获取带衰减的母题回响有效值
+
+        衰减公式:
+        - 每隔5章未回响，有效值衰减10%
+        - 最低衰减到原始值的30%
+
+        Returns:
+            有效的回响计数 (可能是小数)
+        """
+        focus = self.get_narrative_focus()
+        raw_count = focus.get('echo_count', 0)
+        last_echo = focus.get('last_echo_chapter', 0)
+
+        if raw_count == 0:
+            return 0
+
+        chapters_since_echo = current_chapter - last_echo
+        decay_periods = chapters_since_echo // 5
+
+        # 衰减率: 每期衰减10%, 最低30%
+        decay_factor = max(0.3, 1.0 - (decay_periods * 0.1))
+        effective_count = raw_count * decay_factor
+
+        return effective_count
+
+    def record_thematic_echo(self, chapter_num: int, echo_strength: int = 1):
+        """
+        🔥 P2新增: 记录一次母题回响
+
+        Args:
+            chapter_num: 当前章节
+            echo_strength: 回响强度 (1=普通, 2=强烈, 3=高潮点题)
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE narrative_focus
+            SET thematic_echo_count = thematic_echo_count + ?,
+                last_echo_chapter = ?
+            WHERE id = 1
+        ''', (echo_strength, chapter_num))
+
+        conn.commit()
+        conn.close()
+        print(f"   ✨ 母题回响记录: 强度{echo_strength}, 章节{chapter_num}")
+
+    def reset_echo_for_new_arc(self, arc_name: str, chapter_num: int, new_theme: str = None):
+        """
+        🔥 P2新增: 切换单元时重置母题计数
+
+        当开始新的叙事单元(Arc)时:
+        1. 重置echo_count为0
+        2. 更新arc_start_chapter
+        3. 可选更新主题
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        update_fields = [
+            "thematic_echo_count = 0",
+            "last_echo_chapter = ?",
+            "arc_start_chapter = ?",
+            "current_arc = ?"
+        ]
+        params = [chapter_num, chapter_num, arc_name]
+
+        if new_theme:
+            update_fields.append("current_theme = ?")
+            params.append(new_theme)
+
+        sql = f"UPDATE narrative_focus SET {', '.join(update_fields)} WHERE id = 1"
+        cursor.execute(sql, params)
+
+        conn.commit()
+        conn.close()
+        print(f"   🔄 单元切换: {arc_name}, 母题计数重置, 起始章节: {chapter_num}")
+        if new_theme:
+            print(f"      新母题: {new_theme}")
+
+    def check_thematic_health(self, current_chapter: int) -> Dict[str, Any]:
+        """
+        🔥 P2新增: 检查母题健康度
+
+        Returns:
+            Dict with:
+            - effective_echo: 有效回响值
+            - chapters_since_last: 距上次回响章节数
+            - health_status: 'healthy' | 'warning' | 'critical'
+            - recommendation: 建议操作
+        """
+        focus = self.get_narrative_focus()
+        effective_echo = self.get_effective_echo_count(current_chapter)
+        last_echo = focus.get('last_echo_chapter', 0)
+        arc_start = focus.get('arc_start_chapter', 1)
+
+        chapters_since_last = current_chapter - last_echo
+        chapters_in_arc = current_chapter - arc_start
+
+        # 健康度判断
+        # 每20章应该至少有3次回响 (目标echo_count >= 3)
+        expected_echoes = max(1, chapters_in_arc // 20) * 3
+
+        if effective_echo >= expected_echoes:
+            status = 'healthy'
+            recommendation = None
+        elif effective_echo >= expected_echoes * 0.5:
+            status = 'warning'
+            recommendation = f"母题回响偏少，建议在近期章节中安排点题事件"
+        else:
+            status = 'critical'
+            recommendation = f"母题严重缺失！必须在下一章安排强力点题事件"
+
+        # 额外检查: 连续10章无回响也是危险信号
+        if chapters_since_last >= 10 and status != 'critical':
+            status = 'warning'
+            recommendation = f"已连续{chapters_since_last}章无母题回响，建议尽快安排点题"
+
+        return {
+            "effective_echo": round(effective_echo, 2),
+            "raw_echo": focus.get('echo_count', 0),
+            "chapters_since_last": chapters_since_last,
+            "chapters_in_arc": chapters_in_arc,
+            "health_status": status,
+            "recommendation": recommendation,
+            "current_theme": focus.get('theme', '成长')
         }
 
     # --- 分级摘要管理 (Fractal Summaries) ---
@@ -1341,17 +1641,123 @@ class MemoryManager:
         conn.commit()
         conn.close()
 
-    def resolve_foreshadowing(self, clue_id: int, chapter_resolved: int):
-        conn = sqlite3.connect(self.db_path)
+    def resolve_foreshadowing(self, clue_id: int, chapter_resolved: int, confidence: float = 1.0):
+        """
+        🔥 P0升级: 核心伏笔(importance≥8)进入人工确认队列，而非直接回收
+
+        Args:
+            clue_id: 伏笔ID
+            chapter_resolved: 提议回收的章节
+            confidence: 系统检测的置信度 (0-1)
+        """
+        conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE foreshadowing SET status = "resolved", chapter_resolved = ? WHERE id = ?', (chapter_resolved, clue_id))
+
+        # 检查伏笔的importance
+        cursor.execute('SELECT importance, content FROM foreshadowing WHERE id = ?', (clue_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            conn.close()
+            return
+
+        importance = row[0] or 5
+        content = row[1]
+
+        if importance >= 8:
+            # 核心伏笔: 进入人工确认队列
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET pending_resolution = 1,
+                    resolution_chapter_proposed = ?,
+                    resolution_confidence = ?,
+                    human_reviewed = 0
+                WHERE id = ?
+            ''', (chapter_resolved, confidence, clue_id))
+            print(f"   ⏳ 核心伏笔 ID:{clue_id} 进入人工确认队列 (Importance:{importance})")
+            print(f"      内容: {content[:40]}...")
+        else:
+            # 普通伏笔: 直接回收
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET status = "resolved",
+                    chapter_resolved = ?,
+                    human_reviewed = 1,
+                    human_approved = 1
+                WHERE id = ?
+            ''', (chapter_resolved, clue_id))
+
+        conn.commit()
+        conn.close()
+
+    def get_pending_foreshadowing_resolutions(self) -> List[Dict[str, Any]]:
+        """
+        🔥 P0新增: 获取待人工确认的伏笔回收列表
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance, resolution_chapter_proposed, resolution_confidence
+            FROM foreshadowing
+            WHERE pending_resolution = 1 AND human_reviewed = 0
+            ORDER BY importance DESC, resolution_confidence DESC
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [{
+            "id": r[0],
+            "chapter_created": r[1],
+            "content": r[2],
+            "importance": r[3],
+            "proposed_chapter": r[4],
+            "confidence": r[5]
+        } for r in rows]
+
+    def approve_foreshadowing_resolution(self, clue_id: int, approved: bool, notes: str = ""):
+        """
+        🔥 P0新增: 人工审核伏笔回收
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        if approved:
+            # 确认回收
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET status = "resolved",
+                    chapter_resolved = resolution_chapter_proposed,
+                    pending_resolution = 0,
+                    human_reviewed = 1,
+                    human_approved = 1,
+                    notes = COALESCE(notes, '') || ' | 人工确认: ' || ?
+                WHERE id = ?
+            ''', (notes, clue_id))
+            print(f"   ✅ 伏笔 ID:{clue_id} 人工确认回收")
+        else:
+            # 驳回回收
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET pending_resolution = 0,
+                    human_reviewed = 1,
+                    human_approved = 0,
+                    notes = COALESCE(notes, '') || ' | 人工驳回: ' || ?
+                WHERE id = ?
+            ''', (notes, clue_id))
+            print(f"   ❌ 伏笔 ID:{clue_id} 人工驳回回收，保持活跃")
+
         conn.commit()
         conn.close()
 
     def get_active_foreshadowing(self) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT id, chapter_created, content, importance FROM foreshadowing WHERE status = "active"')
+        # 🔥 P0修改: 排除待确认的伏笔
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance
+            FROM foreshadowing
+            WHERE status = "active" AND pending_resolution = 0
+        ''')
         rows = cursor.fetchall()
         conn.close()
         return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3] if len(r) > 3 else 5} for r in rows]
@@ -1703,3 +2109,167 @@ class MemoryManager:
                 "status": data.get("current_state", "正常")
             })
         return result
+
+    # ========================
+    # 🔥 P0新增: Neo4j 降级备份系统 (Relationship Backup System)
+    # ========================
+
+    def backup_relationship(self, source: str, source_type: str, relation: str,
+                           target: str, target_type: str, chapter_num: int,
+                           description: str = "", is_negated: bool = False):
+        """
+        将关系同时写入SQLite备份表。
+        当Neo4j不可用时，可从此表恢复或查询关系。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        if is_negated:
+            # 逻辑删除: 设置 end_chapter
+            cursor.execute('''
+                UPDATE relationship_backup
+                SET end_chapter = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE source_name = ? AND relation = ? AND target_name = ? AND end_chapter IS NULL
+            ''', (chapter_num, source, relation, target))
+        else:
+            # 插入或更新
+            cursor.execute('''
+                INSERT INTO relationship_backup (source_name, source_type, relation, target_name, target_type, description, start_chapter)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_name, relation, target_name, start_chapter) DO UPDATE SET
+                    description = excluded.description,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (source, source_type, relation, target, target_type, description, chapter_num))
+
+        conn.commit()
+        conn.close()
+
+    def backup_event(self, event_uid: str, description: str, chapter: int,
+                    event_type: str = "Major", participants: List[str] = None,
+                    cause_event_uid: str = None):
+        """
+        将事件同时写入SQLite备份表。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        participants_json = json.dumps(participants or [])
+
+        cursor.execute('''
+            INSERT INTO event_backup (event_uid, description, chapter, event_type, participants, cause_event_uid)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_uid) DO UPDATE SET
+                description = excluded.description,
+                participants = excluded.participants,
+                cause_event_uid = excluded.cause_event_uid
+        ''', (event_uid, description, chapter, event_type, participants_json, cause_event_uid))
+
+        conn.commit()
+        conn.close()
+
+    def query_relationships_from_backup(self, entity_name: str, current_chapter: int = 999999) -> str:
+        """
+        🔥 从SQLite备份表查询关系 (Neo4j降级模式专用)
+
+        Returns:
+            格式化的关系字符串
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 查询该实体作为source的关系
+        cursor.execute('''
+            SELECT source_name, relation, target_name, target_type, description, start_chapter
+            FROM relationship_backup
+            WHERE source_name = ?
+              AND (start_chapter IS NULL OR start_chapter <= ?)
+              AND (end_chapter IS NULL OR end_chapter > ?)
+            ORDER BY start_chapter DESC
+            LIMIT 20
+        ''', (entity_name, current_chapter, current_chapter))
+        outgoing = cursor.fetchall()
+
+        # 查询该实体作为target的关系
+        cursor.execute('''
+            SELECT source_name, relation, target_name, source_type, description, start_chapter
+            FROM relationship_backup
+            WHERE target_name = ?
+              AND (start_chapter IS NULL OR start_chapter <= ?)
+              AND (end_chapter IS NULL OR end_chapter > ?)
+            ORDER BY start_chapter DESC
+            LIMIT 20
+        ''', (entity_name, current_chapter, current_chapter))
+        incoming = cursor.fetchall()
+
+        conn.close()
+
+        if not outgoing and not incoming:
+            return f"SQLite备份中暂无关于 {entity_name} 的关系记录。"
+
+        lines = [f"# 🗄️ 关系备份 (SQLite Fallback) - {entity_name}"]
+
+        if outgoing:
+            lines.append("\n## 出向关系 (Outgoing):")
+            for src, rel, tgt, tgt_type, desc, ch in outgoing:
+                ch_tag = f" @Ch{ch}" if ch else ""
+                desc_tag = f" ({desc})" if desc else ""
+                lines.append(f"  ({src}) --[{rel}]--> ({tgt}:{tgt_type}){desc_tag}{ch_tag}")
+
+        if incoming:
+            lines.append("\n## 入向关系 (Incoming):")
+            for src, rel, tgt, src_type, desc, ch in incoming:
+                ch_tag = f" @Ch{ch}" if ch else ""
+                desc_tag = f" ({desc})" if desc else ""
+                lines.append(f"  ({src}:{src_type}) --[{rel}]--> ({tgt}){desc_tag}{ch_tag}")
+
+        return "\n".join(lines)
+
+    def query_causal_chain_from_backup(self, event_uid: str, depth: int = 3) -> str:
+        """
+        🔥 从SQLite备份表追溯因果链 (Neo4j降级模式专用)
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        chain = []
+        current_uid = event_uid
+
+        for i in range(depth):
+            cursor.execute('''
+                SELECT cause_event_uid, description, chapter
+                FROM event_backup
+                WHERE event_uid = ? AND cause_event_uid IS NOT NULL
+            ''', (current_uid,))
+            row = cursor.fetchone()
+
+            if not row or not row[0]:
+                break
+
+            cause_uid, desc, chapter = row
+            chain.append(f"   ⬆️ [Ch{chapter}] 因为: {desc}")
+            current_uid = cause_uid
+
+        conn.close()
+
+        if not chain:
+            return "（SQLite备份中无明确前因记录）"
+
+        return "导致此事件的因果链 (SQLite Backup):\n" + "\n".join(chain)
+
+    def get_entity_context_with_fallback(self, entity_name: str, current_chapter: int = 999999) -> str:
+        """
+        🔥 带降级的实体上下文查询
+
+        优先使用Neo4j，失败时自动回退到SQLite备份。
+        """
+        # 尝试 Neo4j
+        if self.graph.is_connected():
+            try:
+                result = self.graph.query_entity_context(entity_name, current_chapter=current_chapter)
+                if result and "暂无" not in result and "不可用" not in result:
+                    return result
+            except Exception as e:
+                print(f"   ⚠️ Neo4j查询失败: {e}, 回退到SQLite备份")
+
+        # 回退到 SQLite
+        return self.query_relationships_from_backup(entity_name, current_chapter)

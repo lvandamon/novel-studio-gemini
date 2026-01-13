@@ -30,8 +30,11 @@ class ContextManager:
         except:
             self.encoder = tiktoken.get_encoding("cl100k_base")
 
-        # 🔥 P0修复: 扩大总预算至64k (适配200万字长篇后期需求)
-        self.total_budget = 64000
+        # 🔥 P1升级: 动态预算系统 (适配200万字长篇后期需求)
+        # 根据章节数动态调整预算上限
+        self.base_total_budget = 64000  # 基础预算
+        self.max_total_budget = 96000   # 最大预算 (用于后期复杂场景)
+        self.total_budget = self.base_total_budget  # 当前预算(动态调整)
 
         # 基础层预算 (硬性保留) - 同步扩容
         self.base_budgets = {
@@ -46,13 +49,49 @@ class ContextManager:
         self._cache = {
             "world_bible": {"content": None, "chapter": -1},  # 每10章刷新
             "volume_plan": {"content": None, "volume_id": None},  # 卷切换时刷新
-            "vocabulary": {"content": None, "arc_name": None}  # 单元切换时刷新
+            "vocabulary": {"content": None, "arc_name": None},  # 单元切换时刷新
+            "character_summaries": {}  # 🔥 P1新增: 角色摘要缓存
+        }
+
+        # 🔥 P1新增: 压缩策略配置
+        self.compression_config = {
+            "aggressive_threshold": 0.8,  # 超过80%预算启动激进压缩
+            "chunk_size": 8000,  # 分块压缩大小
+            "max_compression_rounds": 3  # 最大压缩轮次
         }
 
         # 初始化 LLM 链
         self.llm = get_deepseek_chat(temperature=0.1)
         self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
         self.compressor_chain = CONTEXT_COMPRESSION_PROMPT | self.llm | StrOutputParser()
+
+    def _adjust_budget_for_chapter(self, chapter_num: int, active_characters_count: int = 0):
+        """
+        🔥 P1新增: 根据章节数和场景复杂度动态调整预算
+
+        策略:
+        - 前100章: 基础预算 (64k)
+        - 100-500章: 线性增长到 80k
+        - 500章+: 最大预算 (96k)
+        - 多角色场景 (>7人): 额外 +10%
+        """
+        base = self.base_total_budget
+
+        if chapter_num < 100:
+            self.total_budget = base
+        elif chapter_num < 500:
+            # 线性插值
+            progress = (chapter_num - 100) / 400
+            self.total_budget = int(base + (self.max_total_budget - base) * 0.5 * progress)
+        else:
+            self.total_budget = int(base + (self.max_total_budget - base) * 0.5)
+
+        # 多角色加成
+        if active_characters_count > 7:
+            self.total_budget = int(self.total_budget * 1.1)
+
+        # 上限保护
+        self.total_budget = min(self.total_budget, self.max_total_budget)
 
     def _count_tokens(self, text: str) -> int:
         return len(self.encoder.encode(text))
@@ -80,37 +119,138 @@ class ContextManager:
 
     def _smart_fit(self, content: str, budget: int) -> str:
         """
-        智能适配预算 (Smart Compression Strategy)
-        1. 计算当前 token 数。
-        2. 如果超标，调用 LLM 进行语义压缩 (Semantic Compression)。
-        3. 如果压缩后依然超标 (罕见)，执行物理裁剪 (Physical Trimming) 作为兜底。
+        🔥 P1升级: 分块递进压缩策略 (Chunked Progressive Compression)
+
+        策略:
+        1. 计算当前 token 数
+        2. 轻度超标 (<1.5x): 单次语义压缩
+        3. 中度超标 (1.5x-3x): 分块压缩后合并
+        4. 严重超标 (>3x): 多轮激进压缩
+        5. 最终兜底: 物理裁剪
         """
         current_usage = self._count_tokens(content)
         if current_usage <= budget:
             return content
-            
-        print(f"   🤏 Context Overflow ({current_usage} > {budget}). Triggering Semantic Compression...")
-        
+
+        overflow_ratio = current_usage / budget
+        print(f"   🤏 Context Overflow ({current_usage} > {budget}, ratio: {overflow_ratio:.2f}x). Triggering Smart Compression...")
+
         try:
-            # 尝试压缩
-            compressed_content = self.compressor_chain.invoke({
-                "content": content,
-                "budget": budget
-            })
-            
-            new_usage = self._count_tokens(compressed_content)
-            print(f"   -> Compressed to {new_usage} tokens.")
-            
-            # 如果依然超标，进行物理裁剪
-            if new_usage > budget:
-                print("   ⚠️ Compression insufficient. Applying physical trim fallback.")
-                return self._trim_lines_to_budget(compressed_content, budget)
-                
-            return compressed_content
-            
+            if overflow_ratio <= 1.5:
+                # 轻度超标: 单次压缩
+                return self._single_compress(content, budget)
+
+            elif overflow_ratio <= 3.0:
+                # 中度超标: 分块压缩
+                return self._chunked_compress(content, budget)
+
+            else:
+                # 严重超标: 多轮激进压缩
+                return self._aggressive_compress(content, budget)
+
         except Exception as e:
             print(f"   ⚠️ Compression Failed: {e}. Fallback to trim.")
             return self._trim_lines_to_budget(content, budget)
+
+    def _single_compress(self, content: str, budget: int) -> str:
+        """单次语义压缩"""
+        compressed = self.compressor_chain.invoke({
+            "content": content,
+            "budget": budget
+        })
+
+        new_usage = self._count_tokens(compressed)
+        print(f"   -> Single compressed to {new_usage} tokens.")
+
+        if new_usage > budget:
+            return self._trim_lines_to_budget(compressed, budget)
+        return compressed
+
+    def _chunked_compress(self, content: str, budget: int) -> str:
+        """
+        🔥 P1新增: 分块压缩
+
+        将内容按段落分块，每块独立压缩后合并
+        """
+        chunk_size = self.compression_config["chunk_size"]
+
+        # 按段落分割
+        paragraphs = content.split('\n\n')
+        chunks = []
+        current_chunk = []
+        current_size = 0
+
+        for para in paragraphs:
+            para_size = self._count_tokens(para)
+            if current_size + para_size > chunk_size and current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+                current_chunk = [para]
+                current_size = para_size
+            else:
+                current_chunk.append(para)
+                current_size += para_size
+
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+
+        print(f"   -> Split into {len(chunks)} chunks for parallel compression")
+
+        # 每块分配预算
+        per_chunk_budget = budget // len(chunks)
+        compressed_chunks = []
+
+        for i, chunk in enumerate(chunks):
+            chunk_tokens = self._count_tokens(chunk)
+            if chunk_tokens > per_chunk_budget:
+                compressed = self.compressor_chain.invoke({
+                    "content": chunk,
+                    "budget": per_chunk_budget
+                })
+                compressed_chunks.append(compressed)
+            else:
+                compressed_chunks.append(chunk)
+
+        result = '\n\n'.join(compressed_chunks)
+        final_usage = self._count_tokens(result)
+        print(f"   -> Chunked compression complete: {final_usage} tokens")
+
+        if final_usage > budget:
+            return self._trim_lines_to_budget(result, budget)
+        return result
+
+    def _aggressive_compress(self, content: str, budget: int) -> str:
+        """
+        🔥 P1新增: 多轮激进压缩
+
+        用于严重超标情况，迭代压缩直到满足预算
+        """
+        max_rounds = self.compression_config["max_compression_rounds"]
+        current_content = content
+        current_usage = self._count_tokens(content)
+
+        for round_num in range(max_rounds):
+            target_budget = budget if round_num == max_rounds - 1 else int(current_usage * 0.5)
+            target_budget = max(target_budget, budget)
+
+            print(f"   -> Aggressive round {round_num + 1}/{max_rounds}, target: {target_budget}")
+
+            compressed = self.compressor_chain.invoke({
+                "content": current_content,
+                "budget": target_budget
+            })
+
+            new_usage = self._count_tokens(compressed)
+            print(f"   -> Round {round_num + 1} result: {new_usage} tokens")
+
+            if new_usage <= budget:
+                return compressed
+
+            current_content = compressed
+            current_usage = new_usage
+
+        # 最终兜底
+        print("   ⚠️ Max rounds reached. Applying physical trim.")
+        return self._trim_lines_to_budget(current_content, budget)
 
     def _get_cached_or_build(self, cache_key: str, build_func, invalidate_check) -> str:
         """
@@ -266,6 +406,121 @@ class ContextManager:
         # 按分数降序排序
         ranked = sorted(scores.items(), key=lambda x: -x[1])
         return [name for name, _ in ranked]
+
+    def apply_character_rate_limiting(self, characters: List[str], chapter_num: int, outline: str,
+                                      max_primary: int = 5, max_total: int = 10) -> Dict[str, List[str]]:
+        """
+        🔥 P2新增: 多角色场景限流器
+
+        当角色数量超过阈值时，自动分组处理:
+        - Primary组: 获得完整的上下文 (最多max_primary人)
+        - Secondary组: 获得简化的上下文 (总数不超过max_total)
+        - Excluded组: 被排除的角色 (超出max_total)
+
+        策略:
+        - 超过10人: 发出警告，分批处理
+        - 超过15人: 强制限制，可能需要分段生成
+
+        Returns:
+            Dict with 'primary', 'secondary', 'excluded' lists
+        """
+        total_count = len(characters)
+
+        result = {
+            "primary": [],
+            "secondary": [],
+            "excluded": [],
+            "warning": None,
+            "requires_batch_generation": False
+        }
+
+        if total_count <= max_primary:
+            # 角色数量较少，全部作为主要角色
+            result["primary"] = characters
+            return result
+
+        # 角色排序
+        ranked = self._rank_characters_by_priority(characters, chapter_num, outline)
+
+        if total_count <= max_total:
+            # 中等数量: 分为主要和次要
+            result["primary"] = ranked[:max_primary]
+            result["secondary"] = ranked[max_primary:]
+            print(f"   👥 角色限流: {total_count}人 -> 主要{len(result['primary'])}人 + 次要{len(result['secondary'])}人")
+            return result
+
+        # 大量角色: 需要排除部分
+        result["primary"] = ranked[:max_primary]
+        result["secondary"] = ranked[max_primary:max_total]
+        result["excluded"] = ranked[max_total:]
+
+        # 发出警告
+        if total_count > 15:
+            result["warning"] = f"⚠️ 场景角色过多({total_count}人)，建议分段生成以保证质量"
+            result["requires_batch_generation"] = True
+            print(f"   ⚠️ 角色限流警告: {total_count}人超出上限，排除{len(result['excluded'])}人")
+        else:
+            print(f"   👥 角色限流: {total_count}人 -> 主要{max_primary}人 + 次要{max_total - max_primary}人，排除{len(result['excluded'])}人")
+
+        return result
+
+    def build_batch_context_for_crowd_scene(self, chapter_num: int, outline: str,
+                                            all_characters: List[str], scene_location: str,
+                                            batch_size: int = 8) -> List[Dict[str, Any]]:
+        """
+        🔥 P2新增: 大规模场景分批上下文生成
+
+        用于超过15人的大场景，将场景分成多个批次处理:
+        - 每批次最多batch_size个角色
+        - 主角始终在每个批次中
+        - 返回多个上下文包，供Writer分段生成
+
+        Returns:
+            List of context dicts, each containing:
+            - batch_num: 批次号
+            - characters: 本批次角色
+            - context: 本批次上下文
+            - focus_hint: 本批次写作重点提示
+        """
+        # 获取主角
+        protagonists = []
+        for char_name in all_characters:
+            char = self.memory.get_character(char_name)
+            if char and char.get('is_protagonist', False):
+                protagonists.append(char_name)
+
+        # 如果没有标记主角，取大纲中提及最多的
+        if not protagonists:
+            mention_counts = [(c, outline.count(c)) for c in all_characters]
+            mention_counts.sort(key=lambda x: -x[1])
+            if mention_counts:
+                protagonists = [mention_counts[0][0]]
+
+        # 排除主角后的其他角色
+        others = [c for c in all_characters if c not in protagonists]
+        ranked_others = self._rank_characters_by_priority(others, chapter_num, outline)
+
+        # 分批
+        batches = []
+        batch_num = 0
+
+        for i in range(0, len(ranked_others), batch_size - len(protagonists)):
+            batch_chars = protagonists + ranked_others[i:i + batch_size - len(protagonists)]
+            batch_num += 1
+
+            # 为每个批次构建简化上下文
+            batch_context = {
+                "batch_num": batch_num,
+                "total_batches": (len(ranked_others) + batch_size - len(protagonists) - 1) // (batch_size - len(protagonists)) + 1,
+                "characters": batch_chars,
+                "focus_hint": f"本批次重点描写: {', '.join(batch_chars[:3])}",
+                "context": None  # 延迟构建
+            }
+
+            batches.append(batch_context)
+
+        print(f"   📦 大场景分批: {len(all_characters)}人 -> {len(batches)}个批次")
+        return batches
 
     def _analyze_plot_intent(self, outline: str) -> Dict[str, Any]:
         """

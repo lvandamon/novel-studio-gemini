@@ -2,8 +2,8 @@ import json
 import re
 from typing import Dict, Any, List
 from langchain_core.output_parsers import StrOutputParser
-from core.llm import get_deepseek_reasoner
-from core.prompts import REVIEWER_CHECK_PROMPT
+from core.llm import get_deepseek_reasoner, get_deepseek_chat
+from core.prompts import REVIEWER_CHECK_PROMPT, ANCHOR_VIOLATION_CHECK_PROMPT
 from core.memory import MemoryManager
 from core.physics_validator import PhysicsValidator  # 🔥 P1新增
 
@@ -15,6 +15,10 @@ class ReviewerAgent:
         self.memory = memory_manager
         self.physics_validator = PhysicsValidator(memory_manager)  # 🔥 P1新增
 
+        # 🔥 P0新增: 锚点校验专用轻量LLM (快速校验)
+        self.anchor_validator_llm = get_deepseek_chat(temperature=0.1)
+        self.anchor_chain = ANCHOR_VIOLATION_CHECK_PROMPT | self.anchor_validator_llm | StrOutputParser()
+
     def _clean_json(self, text: str) -> str:
         # Remove <think> blocks
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
@@ -25,6 +29,88 @@ class ReviewerAgent:
         if match:
             return match.group(1)
         return text
+
+    def _validate_anchors_post_generation(self, content: str, active_characters: List[str], chapter_num: int) -> Dict[str, Any]:
+        """
+        🔥 P0新增: 后置锚点校验 (Post-Generation Anchor Validation)
+
+        在Writer生成内容后，专门检查是否存在OOC违规。
+        这是针对Simulator仅检查大纲的补充。
+
+        Returns:
+            Dict with keys: has_violation, violations, severity
+        """
+        result = {
+            "has_violation": False,
+            "violations": [],
+            "max_severity": "NONE"
+        }
+
+        if not active_characters:
+            return result
+
+        # 收集所有角色的锚点
+        all_anchors = []
+        for char_name in active_characters:
+            anchors_text = self.memory.get_character_anchors(char_name)
+            if anchors_text:
+                all_anchors.append(f"## {char_name}\n{anchors_text}")
+
+        if not all_anchors:
+            return result  # 无锚点则跳过
+
+        anchors_combined = "\n\n".join(all_anchors)
+
+        # 提取角色相关的内容片段 (减少token消耗)
+        char_snippets = []
+        for char_name in active_characters:
+            # 找到所有提及该角色的段落
+            paragraphs = content.split('\n\n')
+            for para in paragraphs:
+                if char_name in para:
+                    char_snippets.append(para[:500])  # 每段最多500字
+
+        if not char_snippets:
+            return result
+
+        content_sample = "\n---\n".join(char_snippets[:10])  # 最多10个片段
+
+        try:
+            print("   ⚓ 执行后置锚点校验...")
+            response = self.anchor_chain.invoke({
+                "anchors": anchors_combined,
+                "content": content_sample
+            })
+
+            clean_res = self._clean_json(response)
+            validation_result = json.loads(clean_res)
+
+            violations = validation_result.get("violations", [])
+
+            if violations:
+                result["has_violation"] = True
+                result["violations"] = violations
+
+                # 计算最高严重性
+                severities = [v.get("severity", "WARNING") for v in violations]
+                if "CRITICAL" in severities:
+                    result["max_severity"] = "CRITICAL"
+                elif "ERROR" in severities:
+                    result["max_severity"] = "ERROR"
+                else:
+                    result["max_severity"] = "WARNING"
+
+                print(f"   ⚠️ 发现 {len(violations)} 个锚点违规! 最高等级: {result['max_severity']}")
+                for v in violations[:3]:  # 显示前3个
+                    print(f"      - [{v.get('severity')}] {v.get('character')}: {v.get('issue')[:50]}...")
+            else:
+                print("   ✅ 锚点校验通过")
+
+            return result
+
+        except Exception as e:
+            print(f"   ⚠️ 锚点校验失败: {e}，默认放行")
+            return result
 
     def review_draft(self, content: str, chapter_num: int, active_characters: List[str] = None) -> str:
         """
@@ -74,6 +160,27 @@ class ReviewerAgent:
                     "physics_violation_count": len(physics_violations),
                     "plot_logic_score": 0,
                     "alignment_score": 0
+                }
+            })
+
+        # 🔥 P0新增: 后置锚点校验 (OOC检测)
+        anchor_validation = self._validate_anchors_post_generation(content, active_characters, chapter_num)
+        if anchor_validation["has_violation"] and anchor_validation["max_severity"] == "CRITICAL":
+            # 致命OOC违规,直接拦截
+            ooc_report = "❌ 检测到致命OOC违规 (Out Of Character):\n"
+            for v in anchor_validation["violations"]:
+                ooc_report += f"- [{v.get('severity')}] {v.get('character')}: {v.get('issue')}\n"
+                ooc_report += f"  违规内容: {v.get('evidence', 'N/A')[:100]}...\n"
+                ooc_report += f"  修改建议: {v.get('suggestion', '请重写该角色的言行')}\n"
+
+            print(f"   🔴 检测到致命OOC违规,强制拦截!")
+            return json.dumps({
+                "status": "BLOCK",
+                "suggestion": ooc_report,
+                "metrics": {
+                    "character_consistency_score": 0,
+                    "plot_logic_score": 50,
+                    "alignment_score": 50
                 }
             })
 

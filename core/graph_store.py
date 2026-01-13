@@ -130,27 +130,101 @@ class GraphManager:
             session.run(query, char_name=character_name, event_uid=str(event_uid), role=role)
 
     @retry_neo4j()
-    def query_causal_chain(self, event_uid: str, depth: int = 3) -> str:
+    def query_causal_chain(self, event_uid: str, depth: int = 3, include_core_events: bool = True) -> str:
         """
-        反向追溯：查出导致该事件的前因后果。
+        🔥 P1升级: 反向追溯增强版
+
+        改进:
+        1. 支持更深追溯 (核心事件)
+        2. 追溯下游影响
+        3. 包含参与角色
         """
+        if not self.is_connected():
+            return "（知识图谱不可用）"
+
+        # 计算动态深度: 核心事件允许更深追溯
+        actual_depth = depth
+        if include_core_events:
+            # 检查是否是核心事件
+            check_query = """
+            MATCH (e:Event {uid: $uid})
+            RETURN e.type as type
+            """
+            with self.driver.session() as session:
+                result = session.run(check_query, uid=str(event_uid))
+                record = result.single()
+                if record and record['type'] in ['Core', 'Major', 'Climax']:
+                    actual_depth = min(depth + 3, 10)  # 核心事件允许追溯到10层
+
         # 查询导致该事件的上游事件 (Ancestors)
-        query = f"""
-        MATCH p = (root:Event {{uid: $uid}})<-[:CAUSED*1..{depth}]-(cause:Event)
-        RETURN cause.chapter as chap, cause.description as desc, length(p) as dist
+        ancestor_query = f"""
+        MATCH p = (root:Event {{uid: $uid}})<-[:CAUSED*1..{actual_depth}]-(cause:Event)
+        OPTIONAL MATCH (c:Character)-[:PARTICIPATED_IN]->(cause)
+        RETURN cause.uid as uid, cause.chapter as chap, cause.description as desc,
+               cause.type as type, length(p) as dist, collect(c.name) as participants
         ORDER BY dist ASC
+        LIMIT 20
         """
-        
-        chain = []
+
+        chain_up = []
         with self.driver.session() as session:
-            result = session.run(query, uid=str(event_uid))
+            result = session.run(ancestor_query, uid=str(event_uid))
             for record in result:
-                chain.append(f"   ⬆️ [Ch{record['chap']}] 因为: {record['desc']}")
-        
-        if not chain:
-            return "无明确前因记录。"
-            
-        return "导致此事件的因果链:\n" + "\n".join(chain)
+                participants = [p for p in record['participants'] if p]
+                participants_str = f" [{', '.join(participants[:3])}]" if participants else ""
+                event_type = record['type'] or 'Event'
+                chain_up.append(f"   ⬆️ [Ch{record['chap']}] ({event_type}){participants_str} {record['desc']}")
+
+        # 🔥 P1新增: 查询下游影响 (Descendants)
+        descendant_query = f"""
+        MATCH p = (root:Event {{uid: $uid}})-[:CAUSED*1..{min(actual_depth, 5)}]->(effect:Event)
+        OPTIONAL MATCH (c:Character)-[:PARTICIPATED_IN]->(effect)
+        RETURN effect.chapter as chap, effect.description as desc,
+               effect.type as type, length(p) as dist, collect(c.name) as participants
+        ORDER BY dist ASC
+        LIMIT 10
+        """
+
+        chain_down = []
+        with self.driver.session() as session:
+            result = session.run(descendant_query, uid=str(event_uid))
+            for record in result:
+                participants = [p for p in record['participants'] if p]
+                participants_str = f" [{', '.join(participants[:3])}]" if participants else ""
+                event_type = record['type'] or 'Event'
+                chain_down.append(f"   ⬇️ [Ch{record['chap']}] ({event_type}){participants_str} {record['desc']}")
+
+        # 组装结果
+        result_lines = []
+        if chain_up:
+            result_lines.append("📜 上游因果 (导致此事件):")
+            result_lines.extend(chain_up)
+        else:
+            result_lines.append("📜 上游因果: 无明确前因记录")
+
+        if chain_down:
+            result_lines.append("\n📜 下游影响 (此事件导致):")
+            result_lines.extend(chain_down)
+
+        return "\n".join(result_lines) if result_lines else "无明确因果记录。"
+
+    @retry_neo4j()
+    def mark_core_event(self, event_uid: str, is_core: bool = True):
+        """
+        🔥 P1新增: 标记核心事件
+
+        核心事件允许更深的因果追溯
+        """
+        if not self.is_connected():
+            return
+
+        event_type = "Core" if is_core else "Major"
+        query = """
+        MATCH (e:Event {uid: $uid})
+        SET e.type = $type
+        """
+        with self.driver.session() as session:
+            session.run(query, uid=str(event_uid), type=event_type)
 
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
