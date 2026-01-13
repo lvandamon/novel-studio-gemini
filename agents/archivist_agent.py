@@ -8,12 +8,14 @@ from core.llm import get_deepseek_chat
 from core.prompts import ARCHIVIST_EXTRACT_PROMPT, ARCHIVIST_SYSTEM_PROMPT, ARCHIVIST_VALIDATION_PROMPT
 from core.memory import MemoryManager
 from core.schemas import ChapterExtractionSchema, RealityLayer
+from agents.summarizer_agent import SummarizerAgent  # New Import
 
 class ArchivistAgent:
     def __init__(self, memory_manager: MemoryManager):
         self.llm = get_deepseek_chat(temperature=0.1) 
         self.chain = ARCHIVIST_EXTRACT_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
+        self.summarizer = SummarizerAgent(memory_manager)  # Initialize Summarizer
 
     def _clean_json(self, text: str) -> str:
         """
@@ -314,6 +316,9 @@ class ArchivistAgent:
             if extraction.current_date:
                 self.memory.update_world_date(extraction.current_date)
                 print(f"   📅 日期更新: {extraction.current_date}")
+
+            # 9. 触发分级摘要聚合 (Fractal Memory)
+            self.summarizer.trigger_aggregations(chapter_num)
 
         except Exception as e:
             print(f"   ❌ FATAL: 第 {chapter_num} 章归档失败！\n原因: {e}")

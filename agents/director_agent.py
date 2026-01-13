@@ -192,7 +192,8 @@ class DirectorAgent:
                 goal=focus_update.get("current_goal", current_focus.get("goal")),
                 conflict=focus_update.get("current_conflict", current_focus.get("conflict")),
                 state=focus_update.get("world_state_summary", current_focus.get("state")),
-                current_theme=focus_update.get("current_theme", current_focus.get("theme"))
+                current_theme=focus_update.get("current_theme", current_focus.get("theme")),
+                pacing_directive=decision.get("pacing_directive", "Normal")
             )
             print(f"   🎬 叙事指令已下达: {decision.get('pacing_directive')} - {focus_update.get('current_beat')}")
 

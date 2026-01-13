@@ -327,6 +327,12 @@ class ContextManager:
 世界状态摘要: {focus['state']}
 """
 
+        # 🔥 P2新增: 导演指令注入
+        pacing = focus.get('pacing', 'Normal')
+        director_order = f"## 0. 导演最高指令 (Director's Order)\n【节奏要求】: {pacing}"
+        if pacing != 'Normal':
+            director_order += " (请在大纲规划中严格体现此节奏)"
+
         # 3. 近期摘要 (最近 10 章，比 Writer 看得远)
         summaries = []
         for i in range(max(1, chapter_num - 10), chapter_num):
@@ -342,6 +348,7 @@ class ContextManager:
 {bible_text}
 
 # 🎬 导演控制台
+{director_order}
 
 ## 1. 宏观进度
 {progress_text}
@@ -640,9 +647,22 @@ class ContextManager:
 # 📜 前情提要
 【上一章回顾】: {prev_summary}
 """
+
+        # 🔥 P2新增: 导演节奏指令
+        pacing = focus.get('pacing', 'Normal')
+        director_instruction = f"""
+# 🎬 导演指令 (Director's Cut)
+【当前节奏指令】: {pacing}
+"""
+        if pacing in ["Accelerate", "Fast", "High Tension"]:
+             director_instruction += "【执行要求】: 减少环境描写和心理独白，使用短句，加快叙事速度，聚焦动作与冲突。\n"
+        elif pacing in ["Decelerate", "Slow", "Build-up"]:
+             director_instruction += "【执行要求】: 增加环境渲染和心理细节，放慢节奏，营造氛围或情感张力。\n"
+        elif pacing in ["Climax", "Peak"]:
+             director_instruction += "【执行要求】: 全力渲染高潮！将所有情绪和冲突推向顶点，不惜笔墨描写震撼场景。\n"
         
         # 计算剩余预算
-        used_tokens = self._count_tokens(state_text) + self._count_tokens(vocab_text)
+        used_tokens = self._count_tokens(state_text) + self._count_tokens(vocab_text) + self._count_tokens(director_instruction)
         retrieval_budget = current_budget - used_tokens
         # 确保至少有 2000 tokens 给检索，否则报错或强行分配
         if retrieval_budget < 2000:
@@ -749,4 +769,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{physics_text}\n{vocab_text}\n{state_text}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"
+        return f"{bible_text}\n{physics_text}\n{vocab_text}\n{state_text}\n{director_instruction}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"

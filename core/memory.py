@@ -1176,7 +1176,7 @@ class MemoryManager:
         conn.close()
         return row[0] if row and row[0] else "暂无摘要。"
 
-    def update_narrative_focus(self, volume: str, arc: str, beat: str, goal: str, conflict: str, state: str, reset_beat: bool = False, current_date: str = None, current_theme: str = None, echo_count_delta: int = 0):
+    def update_narrative_focus(self, volume: str, arc: str, beat: str, goal: str, conflict: str, state: str, reset_beat: bool = False, current_date: str = None, current_theme: str = None, pacing_directive: str = None, echo_count_delta: int = 0):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -1200,33 +1200,30 @@ class MemoryManager:
 
         if current_theme:
             update_parts.append("current_theme = excluded.current_theme")
+
+        if pacing_directive:
+            update_parts.append("pacing_directive = excluded.pacing_directive")
             
         # 增量更新 echo_count
         if echo_count_delta != 0:
-            # 注意：SQLite UPSERT 的 excluded 引用的是 INSERT 语句中的值。
-            # 对于增量更新，我们需要在 DO UPDATE SET 中直接操作字段。
-            # 但为了简化 UPSERT 逻辑，我们这里采取一种折中方案：
-            # 如果是 UPSERT 触发 UPDATE，则执行特殊的增量逻辑
-            # 由于 SQL 语法的限制，在单条语句中混合全量替换和增量更新比较麻烦。
-            # 简单起见，我们分两步：先执行标准的 UPSERT，再执行增量更新。
             pass 
 
         set_clause = ", ".join(update_parts)
         
-        # 构建 INSERT 的参数
         # 默认值
         def_theme = current_theme if current_theme else "成长"
+        def_pacing = pacing_directive if pacing_directive else "Normal"
         
         # 基础 UPSERT
         insert_sql = '''
-            INSERT INTO narrative_focus (id, current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, thematic_echo_count, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, CURRENT_TIMESTAMP)
+            INSERT INTO narrative_focus (id, current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, pacing_directive, thematic_echo_count, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 {set_clause}
         '''
         
         # 参数准备
-        params = [volume, arc, beat, goal, conflict, state, val_date, def_theme]
+        params = [volume, arc, beat, goal, conflict, state, val_date, def_theme, def_pacing]
         
         # 渲染 set_clause
         final_sql = insert_sql.format(set_clause=set_clause)
@@ -1255,7 +1252,7 @@ class MemoryManager:
     def get_narrative_focus(self) -> Dict[str, Any]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, thematic_echo_count FROM narrative_focus WHERE id = 1')
+        cursor.execute('SELECT current_volume, current_arc, current_beat, current_goal, current_conflict, world_state_summary, chapters_since_last_beat, current_date, current_theme, pacing_directive, thematic_echo_count FROM narrative_focus WHERE id = 1')
         row = cursor.fetchone()
         conn.close()
         if row:
@@ -1269,7 +1266,8 @@ class MemoryManager:
                 "chapters_since_last_beat": row[6],
                 "date": row[7],
                 "theme": row[8] if len(row) > 8 else "成长",
-                "echo_count": row[9] if len(row) > 9 else 0
+                "pacing": row[9] if len(row) > 9 else "Normal",
+                "echo_count": row[10] if len(row) > 10 else 0
             }
         return {
             "volume": "序章", "arc": "引导篇", "beat": "背景铺垫", "goal": "确立主角身份",
@@ -1277,6 +1275,7 @@ class MemoryManager:
             "chapters_since_last_beat": 0,
             "date": "天道历元年1月1日",
             "theme": "生存",
+            "pacing": "Normal",
             "echo_count": 0,
             "last_echo_chapter": 0,
             "arc_start_chapter": 1
