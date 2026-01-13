@@ -50,7 +50,7 @@ class NovelWorkflow:
         self.director = DirectorAgent(memory)
         self.editor = EditorAgent(self.context_manager)
         self.simulator = SimulatorAgent(memory)
-        self.writer = WriterAgent()
+        self.writer = WriterAgent(memory) # 🔥 P1: Pass memory to Writer
         self.reviewer = ReviewerAgent(memory)
         self.reader = ReaderAgent() # Initialize Reader
         self.archivist = ArchivistAgent(memory)
@@ -191,7 +191,7 @@ class NovelWorkflow:
             except:
                 context_package += f"\n\n⚠️【必须修正的问题】(来自上一轮审核):\n{state['review_feedback']}\n"
         
-        draft = self.writer.write_chapter(outline_str, context_package)
+        draft = self.writer.write_chapter(outline_str, context_package, active_characters=active_chars)
         state["draft_content"] = draft
         return state
 

@@ -3,7 +3,8 @@
     "allow": [
       "Bash(wc:*)",
       "Bash(tree:*)",
-      "Bash(uv run python:*)"
+      "Bash(uv run python:*)",
+      "Bash(python:*)"
     ]
   }
 }

@@ -103,61 +103,107 @@ class ForeshadowingAgent:
         # Top 3 suggestions
         return "🔮 伏笔雷达 (Top Priority)：\n" + "\n".join(suggestions[:5])
 
+    def _get_dynamic_threshold(self, importance: int) -> Dict[str, float]:
+        """
+        🔥 P3修复: 根据伏笔重要性动态计算阈值
+
+        策略:
+        - Core Mystery (8-10): 严格匹配，阈值更高，避免误判
+        - Subplot (4-7): 标准阈值
+        - Flavor (1-3): 宽松阈值，容易匹配
+
+        Returns:
+            Dict with 'high', 'medium', 'low' thresholds and score weights
+        """
+        if importance >= 8:  # Core Mystery - 需要更严格
+            return {
+                "high_threshold": 0.80,   # 高相似度阈值
+                "medium_threshold": 0.70,
+                "low_threshold": 0.60,
+                "semantic_weight": 70,    # 语义权重更高
+                "keyword_weight": 30,
+                "pass_score": 60          # 通过分数更高
+            }
+        elif importance >= 4:  # Subplot - 标准
+            return {
+                "high_threshold": 0.75,
+                "medium_threshold": 0.65,
+                "low_threshold": 0.55,
+                "semantic_weight": 60,
+                "keyword_weight": 40,
+                "pass_score": 50
+            }
+        else:  # Flavor - 宽松
+            return {
+                "high_threshold": 0.70,
+                "medium_threshold": 0.58,
+                "low_threshold": 0.48,
+                "semantic_weight": 50,
+                "keyword_weight": 50,
+                "pass_score": 40
+            }
+
     def detect_outline_resolutions(self, outline: str) -> List[int]:
         """
-        🔥 P1升级: 语义嵌入匹配 + 关键词双重验证
+        🔥 P1升级 + P3修复: 语义嵌入匹配 + 关键词双重验证 + 动态阈值
 
         策略:
         1. 使用嵌入向量计算语义相似度 (主要判断)
         2. 关键词匹配作为辅助验证
-        3. 综合评分决定是否回收
+        3. 🔥 P3修复: 根据importance动态调整阈值，避免误判核心伏笔
 
         Returns:
             List[int]: 可能被回收的伏笔ID列表
         """
-        active_hooks = self.memory.get_active_foreshadowing()
-        if not active_hooks:
+        # 获取包含importance的活跃伏笔
+        import sqlite3
+        conn = sqlite3.connect(self.memory.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, chapter_created, content, importance FROM foreshadowing WHERE status = "active"')
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
             return []
 
         potential_resolutions = []
 
-        # 🔥 P1新增: 生成大纲嵌入向量
+        # 生成大纲嵌入向量
         try:
-            from langchain_core.documents import Document
-            outline_doc = Document(page_content=outline)
             outline_embedding = self.memory.embeddings.embed_query(outline)
         except Exception as e:
             print(f"   ⚠️ 嵌入生成失败,回退到关键词匹配: {e}")
             outline_embedding = None
 
-        for hook in active_hooks:
-            hook_id = hook['id']
-            hook_content = hook['content']
+        for row in rows:
+            hook_id, chapter_created, hook_content, importance = row
+            if importance is None:
+                importance = 5
+
+            # 🔥 P3修复: 获取动态阈值
+            thresholds = self._get_dynamic_threshold(importance)
             score = 0.0
 
-            # 策略1: 语义相似度 (60分)
+            # 策略1: 语义相似度
             if outline_embedding:
                 try:
                     hook_embedding = self.memory.embeddings.embed_query(hook_content)
-                    # 计算余弦相似度
                     import numpy as np
                     similarity = np.dot(outline_embedding, hook_embedding) / (
                         np.linalg.norm(outline_embedding) * np.linalg.norm(hook_embedding)
                     )
-                    # 相似度>0.75认为高度相关
-                    if similarity > 0.75:
-                        score += 60
-                    elif similarity > 0.65:
-                        score += 40
-                    elif similarity > 0.55:
-                        score += 20
+
+                    # 🔥 使用动态阈值
+                    if similarity > thresholds["high_threshold"]:
+                        score += thresholds["semantic_weight"]
+                    elif similarity > thresholds["medium_threshold"]:
+                        score += thresholds["semantic_weight"] * 0.67
+                    elif similarity > thresholds["low_threshold"]:
+                        score += thresholds["semantic_weight"] * 0.33
                 except Exception:
                     pass
 
-            # 策略2: 关键词匹配 (40分)
-            # 提取核心实体(人名/物品名等)
-            import re
-            # 提取2-4字的词组
+            # 策略2: 关键词匹配
             keywords = set()
             for i in range(len(hook_content) - 1):
                 for j in range(i+2, min(i+5, len(hook_content)+1)):
@@ -165,16 +211,16 @@ class ForeshadowingAgent:
                     if len(word) >= 2 and word.strip():
                         keywords.add(word)
 
-            # 计算命中率
-            matches = sum(1 for kw in keywords if kw in outline)
             if keywords:
+                matches = sum(1 for kw in keywords if kw in outline)
                 match_rate = matches / len(keywords)
-                score += match_rate * 40
+                score += match_rate * thresholds["keyword_weight"]
 
-            # 综合判断: 得分>50认为可能回收
-            if score >= 50:
+            # 🔥 使用动态通过分数
+            if score >= thresholds["pass_score"]:
                 potential_resolutions.append(hook_id)
-                print(f"   🎯 检测到可能回收伏笔 ID:{hook_id} (Score:{score:.1f})")
+                imp_label = "Core" if importance >= 8 else ("Subplot" if importance >= 4 else "Flavor")
+                print(f"   🎯 检测到可能回收伏笔 ID:{hook_id} [{imp_label}] (Score:{score:.1f}, Threshold:{thresholds['pass_score']})")
 
         return potential_resolutions
 

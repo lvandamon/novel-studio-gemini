@@ -1,6 +1,7 @@
 import os
 import time
 import functools
+import sqlite3
 from typing import List, Dict, Any, Optional
 from neo4j import GraphDatabase, exceptions
 
@@ -27,11 +28,12 @@ def retry_neo4j(max_retries=3, initial_delay=1):
     return decorator
 
 class GraphManager:
-    def __init__(self, uri: str = None, user: str = None, password: str = None):
+    def __init__(self, uri: str = None, user: str = None, password: str = None, db_path: str = "data/novel.db"):
         self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.user = user or os.getenv("NEO4J_USER", "neo4j")
         self.password = password or os.getenv("NEO4J_PASSWORD", "password")
         self.driver = None
+        self.db_path = db_path  # 🔥 P3修复: SQL降级备份数据库路径
         self._connect()
 
     def _connect(self):
@@ -63,7 +65,208 @@ class GraphManager:
             return True
         except:
             return False
-        
+
+    # ============================================================
+    # 🔥 P3修复: SQL降级查询方法 (Neo4j不可用时的备选方案)
+    # ============================================================
+
+    def _get_sql_connection(self):
+        """获取SQL连接用于降级查询"""
+        return sqlite3.connect(self.db_path, timeout=30.0)
+
+    def _fallback_query_entity_context(self, entity_name: str, current_chapter: int = 999999, recent_window: int = 500) -> str:
+        """
+        🔥 P3修复: SQL降级版实体上下文查询
+
+        当Neo4j不可用时，从relationship_backup表查询关系
+        """
+        try:
+            conn = self._get_sql_connection()
+            cursor = conn.cursor()
+
+            chapter_threshold = max(1, current_chapter - recent_window)
+
+            # 查询该实体作为source的关系
+            cursor.execute('''
+                SELECT source_name, source_type, relation, target_name, target_type, description, start_chapter
+                FROM relationship_backup
+                WHERE source_name = ?
+                  AND (start_chapter IS NULL OR start_chapter >= ?)
+                  AND (end_chapter IS NULL OR end_chapter > ?)
+                ORDER BY COALESCE(start_chapter, 0) DESC
+                LIMIT 15
+            ''', (entity_name, chapter_threshold, current_chapter))
+            outgoing = cursor.fetchall()
+
+            # 查询该实体作为target的关系
+            cursor.execute('''
+                SELECT source_name, source_type, relation, target_name, target_type, description, start_chapter
+                FROM relationship_backup
+                WHERE target_name = ?
+                  AND (start_chapter IS NULL OR start_chapter >= ?)
+                  AND (end_chapter IS NULL OR end_chapter > ?)
+                ORDER BY COALESCE(start_chapter, 0) DESC
+                LIMIT 15
+            ''', (entity_name, chapter_threshold, current_chapter))
+            incoming = cursor.fetchall()
+
+            conn.close()
+
+            context_lines = []
+
+            for row in outgoing:
+                source, s_type, rel, target, t_type, desc, start_ch = row
+                desc_str = f" ({desc})" if desc else ""
+                ch_tag = f" @Ch{start_ch}" if start_ch else ""
+                context_lines.append(f"({source}) --[{rel}]--> ({target}){desc_str}{ch_tag}")
+
+            for row in incoming:
+                source, s_type, rel, target, t_type, desc, start_ch = row
+                desc_str = f" ({desc})" if desc else ""
+                ch_tag = f" @Ch{start_ch}" if start_ch else ""
+                context_lines.append(f"({source}) --[{rel}]--> ({target}){desc_str}{ch_tag}")
+
+            if not context_lines:
+                return f"[SQL降级] 暂无关于 {entity_name} 的近期关系记录（近{recent_window}章）。"
+
+            return "[SQL降级模式]\n" + "\n".join(context_lines)
+
+        except Exception as e:
+            return f"[SQL降级查询失败: {e}]"
+
+    def _fallback_query_causal_chain(self, event_uid: str, depth: int = 3) -> str:
+        """
+        🔥 P3修复: SQL降级版因果链查询
+
+        从event_backup表查询因果关系
+        """
+        try:
+            conn = self._get_sql_connection()
+            cursor = conn.cursor()
+
+            # 递归查询上游事件 (简化版，只追溯直接因果)
+            chain_up = []
+            current_uid = event_uid
+            visited = set()
+
+            for _ in range(depth):
+                if current_uid in visited:
+                    break
+                visited.add(current_uid)
+
+                cursor.execute('''
+                    SELECT cause_event_uid FROM event_backup
+                    WHERE event_uid = ? AND cause_event_uid IS NOT NULL
+                ''', (current_uid,))
+                row = cursor.fetchone()
+
+                if not row or not row[0]:
+                    break
+
+                cause_uid = row[0]
+
+                # 获取cause事件详情
+                cursor.execute('''
+                    SELECT description, chapter, event_type, participants
+                    FROM event_backup WHERE event_uid = ?
+                ''', (cause_uid,))
+                cause_row = cursor.fetchone()
+
+                if cause_row:
+                    desc, chap, e_type, participants = cause_row
+                    p_str = f" [{participants}]" if participants else ""
+                    chain_up.append(f"   ⬆️ [Ch{chap}] ({e_type or 'Event'}){p_str} {desc}")
+
+                current_uid = cause_uid
+
+            # 查询下游事件
+            chain_down = []
+            cursor.execute('''
+                SELECT event_uid, description, chapter, event_type, participants
+                FROM event_backup
+                WHERE cause_event_uid = ?
+                ORDER BY chapter ASC
+                LIMIT 10
+            ''', (event_uid,))
+
+            for row in cursor.fetchall():
+                e_uid, desc, chap, e_type, participants = row
+                p_str = f" [{participants}]" if participants else ""
+                chain_down.append(f"   ⬇️ [Ch{chap}] ({e_type or 'Event'}){p_str} {desc}")
+
+            conn.close()
+
+            result_lines = ["[SQL降级模式]"]
+            if chain_up:
+                result_lines.append("📜 上游因果 (导致此事件):")
+                result_lines.extend(chain_up)
+            else:
+                result_lines.append("📜 上游因果: 无明确前因记录")
+
+            if chain_down:
+                result_lines.append("\n📜 下游影响 (此事件导致):")
+                result_lines.extend(chain_down)
+
+            return "\n".join(result_lines)
+
+        except Exception as e:
+            return f"[SQL降级查询失败: {e}]"
+
+    def _fallback_get_multi_entity_relationships(self, entities: List[str], current_chapter: int = None, recent_window: int = 500) -> str:
+        """
+        🔥 P3修复: SQL降级版多实体关系查询
+        """
+        if not entities:
+            return ""
+
+        try:
+            conn = self._get_sql_connection()
+            cursor = conn.cursor()
+
+            chapter_threshold = max(1, (current_chapter or 999999) - recent_window)
+            current_ch = current_chapter or 999999
+
+            # 查询所有涉及这些实体的关系
+            placeholders = ','.join(['?' for _ in entities])
+            query = f'''
+                SELECT DISTINCT source_name, relation, target_name, description, start_chapter
+                FROM relationship_backup
+                WHERE (source_name IN ({placeholders}) OR target_name IN ({placeholders}))
+                  AND (start_chapter IS NULL OR start_chapter >= ?)
+                  AND (end_chapter IS NULL OR end_chapter > ?)
+                ORDER BY COALESCE(start_chapter, 0) DESC
+                LIMIT 30
+            '''
+            params = list(entities) + list(entities) + [chapter_threshold, current_ch]
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                return "[SQL降级] 主要角色之间暂无近期历史关联"
+
+            paths = set()
+            for row in rows:
+                source, rel, target, desc, start_ch = row
+                # 只保留两端都在entities中的关系
+                if source in entities and target in entities:
+                    ch_tag = f" @Ch{start_ch}" if start_ch else ""
+                    paths.add(f"({source}) --[{rel}]--> ({target}){ch_tag}")
+
+            if not paths:
+                # 如果没有直接关系，返回单独的上下文
+                lines = ["[SQL降级模式]"]
+                for entity in entities[:3]:
+                    ctx = self._fallback_query_entity_context(entity, current_ch, recent_window)
+                    if "暂无" not in ctx:
+                        lines.append(f"【{entity}】:\n{ctx}")
+                return "\n\n".join(lines) if len(lines) > 1 else "[SQL降级] 无关系记录"
+
+            return "[SQL降级模式]\n# 🕸️ 深度关系网 (近期)\n" + "\n".join(sorted(paths))
+
+        except Exception as e:
+            return f"[SQL降级查询失败: {e}]"
+
     def _sanitize_label(self, label: str) -> str:
         clean = label.replace("`", "")
         return f"`{clean}`"
@@ -138,9 +341,12 @@ class GraphManager:
         1. 支持更深追溯 (核心事件)
         2. 追溯下游影响
         3. 包含参与角色
+        4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
         """
         if not self.is_connected():
-            return "（知识图谱不可用）"
+            # 🔥 P3修复: 使用SQL降级查询
+            print("   ⚠️ Neo4j不可用，启用SQL降级因果查询...")
+            return self._fallback_query_causal_chain(event_uid, depth)
 
         # 计算动态深度: 核心事件允许更深追溯
         actual_depth = depth
@@ -280,11 +486,14 @@ class GraphManager:
         1. 时间窗口: 只查询近期关系(recent_window章内)
         2. 索引优化: 添加chapter索引提示
         3. 结果限制: 严格限制返回数量
+        4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
 
         性能提升: 1000章场景下从30秒→<3秒
         """
         if not self.is_connected():
-            return f"（知识图谱不可用，跳过关系查询）"
+            # 🔥 P3修复: 使用SQL降级查询
+            print(f"   ⚠️ Neo4j不可用，启用SQL降级查询: {entity_name}")
+            return self._fallback_query_entity_context(entity_name, current_chapter, recent_window)
 
         # 🔥 计算时间窗口下界
         chapter_threshold = max(1, current_chapter - recent_window)
@@ -360,11 +569,14 @@ class GraphManager:
         1. 时间窗口: 仅查询近期建立的关系
         2. 快速失败: 超时或节点过多时提前返回
         3. 结果限制: 严格限制路径数量
+        4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
 
         性能提升: 复杂场景从>30秒→<5秒
         """
         if not self.is_connected():
-            return "（知识图谱不可用，跳过多角色关系查询）"
+            # 🔥 P3修复: 使用SQL降级查询
+            print(f"   ⚠️ Neo4j不可用，启用SQL降级多实体查询...")
+            return self._fallback_get_multi_entity_relationships(entities, current_chapter, recent_window)
 
         if len(entities) < 2:
             return self.query_entity_context(entities[0], current_chapter=current_chapter or 999999) if entities else ""

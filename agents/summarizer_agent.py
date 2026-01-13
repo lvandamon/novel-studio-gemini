@@ -1,4 +1,5 @@
 from typing import List, Dict, Any
+import sqlite3
 from core.llm import get_deepseek_chat
 from core.prompts import SUMMARIZER_EXECUTE_PROMPT, SUMMARIZER_BATCH_PROMPT
 from core.memory import MemoryManager
@@ -11,16 +12,33 @@ class SummarizerAgent:
         self.batch_chain = SUMMARIZER_BATCH_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
 
-    def trigger_aggregations(self, chapter_num: int):
+        # 🔥 P3修复: 重要事件类型定义
+        self.critical_event_types = ["Climax", "Major_Battle", "Death", "Revelation", "Transformation", "Arc_End"]
+
+    def trigger_aggregations(self, chapter_num: int, force_critical: bool = False, critical_reason: str = None):
         """
-        触发分级聚合逻辑 (Fractal Aggregation Trigger)
-        由 Archivist 在每章归档后调用。
-        
+        🔥 P3升级: 触发分级聚合逻辑 (Fractal Aggregation Trigger)
+
         策略:
         1. Level 1 (Batch-10): 每 10 章触发一次 (10, 20, 30...)
         2. Level 2 (Volume/Batch-100): 每 100 章触发一次 (100, 200...)
+        3. 🔥 P3新增: 重要事件触发额外聚合 (Critical Event Trigger)
+
+        Args:
+            chapter_num: 当前章节号
+            force_critical: 是否强制触发关键聚合
+            critical_reason: 触发原因描述
         """
-        if chapter_num <= 0: return
+        if chapter_num <= 0:
+            return
+
+        # 🔥 P3新增: 检查是否有重要事件需要立即聚合
+        should_critical_aggregate = force_critical or self._check_critical_events(chapter_num)
+
+        if should_critical_aggregate:
+            reason = critical_reason or "检测到重要事件"
+            print(f"🚨 [Summarizer] 重要事件触发紧急聚合: {reason}")
+            self._trigger_critical_aggregation(chapter_num)
 
         # Level 1: 每 10 章聚合一次
         if chapter_num % 10 == 0:
@@ -35,6 +53,102 @@ class SummarizerAgent:
             end = chapter_num
             print(f"🔄 [Summarizer] 触发 L2 卷级聚合 (Ch{start}-{end})...")
             self._aggregate_range(level="volume", start=start, end=end, source_level="batch_10")
+
+    def _check_critical_events(self, chapter_num: int) -> bool:
+        """
+        🔥 P3新增: 检查本章是否包含重要事件
+
+        检测条件:
+        1. 事件类型为 Climax/Major_Battle/Death/Revelation
+        2. 遥测数据显示 tension >= 85
+        3. 有核心伏笔被回收
+
+        Returns:
+            bool: 是否需要触发紧急聚合
+        """
+        try:
+            conn = sqlite3.connect(self.memory.db_path)
+            cursor = conn.cursor()
+
+            # 检查1: 是否有重要事件
+            cursor.execute('''
+                SELECT COUNT(*) FROM events
+                WHERE chapter_num = ? AND event_type IN (?, ?, ?, ?, ?, ?)
+            ''', (chapter_num, *self.critical_event_types))
+            critical_event_count = cursor.fetchone()[0]
+
+            if critical_event_count > 0:
+                conn.close()
+                print(f"   📌 检测到 {critical_event_count} 个关键事件")
+                return True
+
+            # 检查2: 遥测数据 tension >= 85
+            cursor.execute('''
+                SELECT tension FROM chapter_metrics WHERE chapter_num = ?
+            ''', (chapter_num,))
+            row = cursor.fetchone()
+            if row and row[0] and row[0] >= 85:
+                conn.close()
+                print(f"   📌 检测到高张力章节 (Tension: {row[0]})")
+                return True
+
+            # 检查3: 核心伏笔回收
+            cursor.execute('''
+                SELECT COUNT(*) FROM foreshadowing
+                WHERE chapter_resolved = ? AND importance >= 8
+            ''', (chapter_num,))
+            core_hook_resolved = cursor.fetchone()[0]
+
+            conn.close()
+
+            if core_hook_resolved > 0:
+                print(f"   📌 检测到 {core_hook_resolved} 个核心伏笔回收")
+                return True
+
+            return False
+
+        except Exception as e:
+            print(f"   ⚠️ 重要事件检测失败: {e}")
+            return False
+
+    def _trigger_critical_aggregation(self, chapter_num: int):
+        """
+        🔥 P3新增: 触发关键事件聚合
+
+        策略:
+        1. 立即聚合最近5章内容 (mini-batch)
+        2. 标记为 'critical' 级别
+        3. 在后续 batch_10 聚合时会优先引用
+        """
+        # 计算范围: 最近5章
+        start = max(1, chapter_num - 4)
+        end = chapter_num
+
+        print(f"   🔄 [Summarizer] 触发 Critical 聚合 (Ch{start}-{end})...")
+
+        # 获取源摘要
+        sources = []
+        for i in range(start, end + 1):
+            s = self.memory.get_chapter_summary(i)
+            if s and s != "暂无摘要。":
+                sources.append(f"[Ch{i}]: {s}")
+
+        if not sources:
+            print(f"   ⚠️ Critical 聚合失败: 无可用摘要")
+            return
+
+        try:
+            # 调用 LLM 生成关键综述
+            critical_summary = self.batch_chain.invoke({
+                "summaries": "\n".join(sources)
+            })
+
+            # 存储为 critical 级别
+            self.memory.save_aggregated_summary("critical", start, end, critical_summary)
+            print(f"   ✅ [Summarizer] Critical 聚合完成 (Ch{start}-{end}, {len(critical_summary)} 字)")
+
+        except Exception as e:
+            print(f"   ❌ [Summarizer] Critical 聚合出错: {e}")
 
     def _aggregate_range(self, level: str, start: int, end: int, source_level: str):
         """

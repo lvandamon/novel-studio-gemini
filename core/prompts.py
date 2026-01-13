@@ -614,7 +614,7 @@ DIRECTOR_EVALUATE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", DIRECTOR_SYSTEM_PROMPT),
         (
             "user",
-            "\n    【当前规划 (Plan)】：\n    Volume: {volume_name} ({volume_goal})\n    Arc: {arc_name} ({arc_goal})\n    进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)\n    预估结束章节: {end_chapter_estimated}\n\n    【叙事历史脉络 (Narrative History)】：\n    {recent_summaries}\n\n    【近期遥测数据 (Narrative Telemetry)】：\n    {telemetry_data}\n\n    【当前叙事焦点】：\n    {current_focus}\n\n    {chaos_injection}\n\n    请进行审计与决策。\n    ",
+            "\n    【当前规划 (Plan)】：\n    Volume: {volume_name} ({volume_goal})\n    Arc: {arc_name} ({arc_goal})\n    进度: 第 {start_chapter} 章 -> 当前第 {current_chapter} 章 (已用 {chapters_used} 章)\n    预估结束章节: {end_chapter_estimated}\n\n    【叙事历史脉络 (Narrative History)】：\n    {recent_summaries}\n\n    【近期遥测数据 (Narrative Telemetry)】：\n    {telemetry_data}\n\n    【当前叙事焦点】：\n    {current_focus}\n\n    【结构化审计 (Structure Audit)】：\n    {structural_analysis}\n\n    {chaos_injection}\n\n    请进行审计与决策。\n    ",
         ),
     ]
 )

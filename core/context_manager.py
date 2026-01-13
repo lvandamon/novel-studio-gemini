@@ -60,6 +60,22 @@ class ContextManager:
             "max_compression_rounds": 3  # 最大压缩轮次
         }
 
+        # 🔥 P3新增: 关键信息保护标记 (Critical Information Markers)
+        # 这些标记包裹的内容在压缩时必须优先保留
+        self.critical_markers = {
+            "anchors": ("⚓️", "⚓️END"),       # 黄金锚点
+            "physics": ("⚙️", "⚙️END"),        # 物理约束
+            "core_hook": ("‼️", "‼️END"),      # 核心伏笔
+            "severed": ("🚨", "🚨END"),        # 断肢警报
+            "director": ("🎬", "🎬END"),       # 导演指令
+        }
+
+        # 🔥 P3新增: 关键词保护列表 (压缩时必须保留的关键词)
+        self.protected_keywords = [
+            "黄金锚点", "绝对不可违背", "部位警报", "缺失", "残废", "SEVERED", "CRIPPLED",
+            "核心悬念", "导演指令", "物理法则", "必须严格遵守"
+        ]
+
         # 初始化 LLM 链
         self.llm = get_deepseek_chat(temperature=0.1)
         self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
@@ -117,16 +133,57 @@ class ContextManager:
             
         return "\n".join(result)
 
+    def _extract_critical_sections(self, content: str) -> tuple:
+        """
+        🔥 P3新增: 提取关键信息段落
+
+        返回: (critical_content, remaining_content, critical_tokens)
+        关键内容在压缩时会被保护
+        """
+        critical_parts = []
+        remaining = content
+
+        # 1. 提取标记保护的内容
+        for marker_name, (start_marker, end_marker) in self.critical_markers.items():
+            pattern = f"{re.escape(start_marker)}(.*?){re.escape(end_marker)}"
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches:
+                critical_parts.append(f"{start_marker}{match}{end_marker}")
+
+        # 2. 提取包含保护关键词的行
+        lines = content.split('\n')
+        protected_lines = []
+        for line in lines:
+            if any(kw in line for kw in self.protected_keywords):
+                if line not in protected_lines:
+                    protected_lines.append(line)
+
+        # 组装关键内容
+        critical_content = '\n'.join(critical_parts + protected_lines)
+        critical_tokens = self._count_tokens(critical_content)
+
+        # 从原内容中移除已保护的内容(避免重复)
+        for part in critical_parts:
+            remaining = remaining.replace(part, '')
+
+        for line in protected_lines:
+            if line in remaining:
+                remaining = remaining.replace(line + '\n', '')
+
+        return critical_content, remaining, critical_tokens
+
     def _smart_fit(self, content: str, budget: int) -> str:
         """
-        🔥 P1升级: 分块递进压缩策略 (Chunked Progressive Compression)
+        🔥 P1升级 + P3修复: 分块递进压缩策略 + 关键信息保护
 
         策略:
-        1. 计算当前 token 数
-        2. 轻度超标 (<1.5x): 单次语义压缩
-        3. 中度超标 (1.5x-3x): 分块压缩后合并
-        4. 严重超标 (>3x): 多轮激进压缩
-        5. 最终兜底: 物理裁剪
+        1. 提取关键信息(锚点/物理约束/核心伏笔)单独保护
+        2. 计算剩余预算给可压缩内容
+        3. 轻度超标 (<1.5x): 单次语义压缩
+        4. 中度超标 (1.5x-3x): 分块压缩后合并
+        5. 严重超标 (>3x): 多轮激进压缩
+        6. 最终兜底: 物理裁剪
+        7. 重新组装: 关键信息 + 压缩后内容
         """
         current_usage = self._count_tokens(content)
         if current_usage <= budget:
@@ -135,22 +192,47 @@ class ContextManager:
         overflow_ratio = current_usage / budget
         print(f"   🤏 Context Overflow ({current_usage} > {budget}, ratio: {overflow_ratio:.2f}x). Triggering Smart Compression...")
 
+        # 🔥 P3新增: 提取关键信息
+        critical_content, remaining_content, critical_tokens = self._extract_critical_sections(content)
+
+        if critical_tokens > 0:
+            print(f"   🛡️ 已保护 {critical_tokens} tokens 的关键信息")
+
+        # 计算可压缩内容的预算
+        compressible_budget = budget - critical_tokens
+
+        # 如果关键信息本身就超出预算，只能物理裁剪关键信息
+        if compressible_budget <= 0:
+            print(f"   ⚠️ 关键信息({critical_tokens} tokens)超出总预算({budget})，强制裁剪...")
+            return self._trim_lines_to_budget(critical_content, budget)
+
+        remaining_usage = self._count_tokens(remaining_content)
+        if remaining_usage <= compressible_budget:
+            # 不需要压缩
+            return critical_content + '\n' + remaining_content
+
+        # 计算需要压缩的比例
+        remaining_overflow = remaining_usage / compressible_budget
+
         try:
-            if overflow_ratio <= 1.5:
-                # 轻度超标: 单次压缩
-                return self._single_compress(content, budget)
-
-            elif overflow_ratio <= 3.0:
-                # 中度超标: 分块压缩
-                return self._chunked_compress(content, budget)
-
+            if remaining_overflow <= 1.5:
+                compressed = self._single_compress(remaining_content, compressible_budget)
+            elif remaining_overflow <= 3.0:
+                compressed = self._chunked_compress(remaining_content, compressible_budget)
             else:
-                # 严重超标: 多轮激进压缩
-                return self._aggressive_compress(content, budget)
+                compressed = self._aggressive_compress(remaining_content, compressible_budget)
+
+            # 🔥 P3新增: 重新组装(关键信息在前)
+            if critical_content.strip():
+                return critical_content + '\n\n' + compressed
+            return compressed
 
         except Exception as e:
             print(f"   ⚠️ Compression Failed: {e}. Fallback to trim.")
-            return self._trim_lines_to_budget(content, budget)
+            trimmed = self._trim_lines_to_budget(remaining_content, compressible_budget)
+            if critical_content.strip():
+                return critical_content + '\n\n' + trimmed
+            return trimmed
 
     def _single_compress(self, content: str, budget: int) -> str:
         """单次语义压缩"""

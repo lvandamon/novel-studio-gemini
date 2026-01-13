@@ -25,16 +25,87 @@ class DirectorAgent:
         # 2. Try to find markdown JSON block
         match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
         if match:
-            return match.group(1)
+            text = match.group(1)
+        else:
+            # 3. Try to find the first valid JSON object enclosed in braces
+            match = re.search(r'(\{.*\})', text, re.DOTALL)
+            if match:
+                text = match.group(1)
             
-        # 3. Try to find the first valid JSON object enclosed in braces
-        # This regex looks for { ... } minimally
-        match = re.search(r'(\{.*\})', text, re.DOTALL)
-        if match:
-            return match.group(1)
-            
-        # 4. Fallback: return original stripped (likely to fail but worth a try)
+        # 4. 🔥 P3新增: 清理非法控制字符 (解决 JSONDecodeError)
+        # 替换 JSON 字符串中未转义的换行符和制表符
+        text = text.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+        
+        # 但我们刚才可能把真正的 JSON 结构括号也给弄乱了，或者把属性间的换行弄乱了。
+        # 更好的做法是只处理字符串内部的换行。
+        # 不过为了简单，我们先尝试最强力的清理：
+        # 重新修复被过度转义的结构字符
+        text = text.replace('\\n{', '{').replace('}\\n', '}').replace('\\n"', '"').replace('"\\n', '"').replace('\\n:', ':').replace(':\\n', ':').replace('\\n,', ',').replace(',\\n', ',')
+
         return text.strip()
+
+    def _fetch_structural_context(self, current_chapter: int) -> str:
+        """
+        🔥 P0新增: 结构化审计上下文 (The Director's Eye)
+        
+        从图谱和数据库中提取深层结构信息，防止导演"瞎指挥"。
+        1. 待处理伏笔 (Open Hooks)
+        2. 活跃因果链 (Active Causal Chains)
+        """
+        # 1. 获取伏笔
+        hooks = self.memory.get_active_foreshadowing()
+        hooks_text = "无活跃伏笔"
+        if hooks:
+            # 按重要性排序
+            sorted_hooks = sorted(hooks, key=lambda x: -x['importance'])
+            lines = []
+            for h in sorted_hooks:
+                imp_mark = "🔥" if h['importance'] >= 8 else "🔸"
+                lines.append(f"- {imp_mark} [ID:{h['id']}] (Ch{h['chapter']}) {h['content']}")
+            hooks_text = "\n".join(lines)
+            
+        # 2. 获取活跃因果链 (Graph Check)
+        # 策略：查找最近 50 章内的 'Major' 或 'Climax' 事件
+        # 我们直接用 SQL 查 events 表拿到 UID，然后去 Graph 查
+        conn = self.memory._get_connection()
+        cursor = conn.cursor()
+        
+        # 只看最近发生的重大事件 (作为因果链的"果"，去追溯"因")
+        start_search = max(1, current_chapter - 20)
+        cursor.execute('''
+            SELECT id, event_type, description, character_name 
+            FROM events 
+            WHERE chapter_num >= ? AND event_type IN ('Major', 'Climax', 'Core')
+            ORDER BY chapter_num DESC
+            LIMIT 3
+        ''', (start_search,))
+        
+        recent_major_events = cursor.fetchall()
+        conn.close()
+        
+        causal_text = "无显著近期因果链"
+        if recent_major_events:
+            chains = []
+            for evt in recent_major_events:
+                eid, etype, desc, chars = evt
+                # 查询该事件的前因后果
+                # depth=2 足够看到直接的前因
+                chain_str = self.memory.graph.query_causal_chain(str(eid), depth=2, include_core_events=False)
+                if "无明确因果" not in chain_str and "SQL降级" not in chain_str:
+                     chains.append(f"### 事件 [{etype}] {desc} ({chars})\n{chain_str}")
+                elif "SQL降级" in chain_str:
+                     chains.append(f"### 事件 [{etype}] {desc}\n{chain_str}")
+                     
+            if chains:
+                causal_text = "\n\n".join(chains)
+        
+        return f"""
+=== 🎣 待回收伏笔 (Open Loops) ===
+{hooks_text}
+
+=== 🕸️ 活跃因果链 (Active Causal Chains) ===
+{causal_text}
+"""
 
     def _format_telemetry(self, current_chapter: int) -> str:
         """格式化最近的遥测数据"""
@@ -130,6 +201,9 @@ class DirectorAgent:
 {recent_text}
 """
 
+        # --- 🔥 结构化审计 (Structure Audit) ---
+        structural_context = self._fetch_structural_context(current_chapter)
+
         # 计算进度
         arc_data = plan.get("arc", {})
         start_chapter = arc_data.get("start_chapter", 1)
@@ -149,6 +223,7 @@ class DirectorAgent:
                 "recent_summaries": full_history_context,
                 "telemetry_data": telemetry_text,
                 "current_focus": json.dumps(focus, ensure_ascii=False),
+                "structural_analysis": structural_context,
                 "chaos_injection": chaos_prompt_injection 
             })
             

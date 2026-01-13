@@ -175,6 +175,43 @@ class MemoryManager:
         try:
             cursor.execute('ALTER TABLE narrative_focus ADD COLUMN arc_start_chapter INTEGER DEFAULT 1')
         except: pass
+        try:
+            cursor.execute('ALTER TABLE narrative_focus ADD COLUMN pacing_directive TEXT DEFAULT "Normal"')
+        except: pass
+
+        # Foreshadowing Table Migrations
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN pending_resolution BOOLEAN DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN resolution_chapter_proposed INTEGER')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN resolution_confidence REAL DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN human_reviewed BOOLEAN DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN human_approved BOOLEAN')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN importance INTEGER DEFAULT 5')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE foreshadowing ADD COLUMN tags TEXT')
+        except: pass
+
+        # Style Guide Migrations
+        try:
+            cursor.execute('ALTER TABLE style_guide ADD COLUMN source TEXT DEFAULT "manual"')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE style_guide ADD COLUMN quality_score REAL DEFAULT 0')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE style_guide ADD COLUMN source_chapter INTEGER')
+        except: pass
 
         # 卷管理表
         cursor.execute('''
@@ -1143,7 +1180,16 @@ class MemoryManager:
                 info += f"状态: {state}\n"
                 info += f"位置: {loc}\n"
                 info += f"境界: {level}\n"
-                info += f"物品栏: {', '.join(inventory) if inventory else '空'}\n"
+                
+                # 🔥 P3修复: 处理对象型物品栏
+                inv_names = []
+                for item in inventory:
+                    if isinstance(item, str):
+                        inv_names.append(item)
+                    elif isinstance(item, dict):
+                        inv_names.append(item.get("name", "未知物品"))
+                
+                info += f"物品栏: {', '.join(inv_names) if inv_names else '空'}\n"
                 snapshot.append(info)
                 
         return "\n".join(snapshot) if snapshot else "无有效硬逻辑数据。"
