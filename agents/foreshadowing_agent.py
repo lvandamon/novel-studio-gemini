@@ -105,33 +105,42 @@ class ForeshadowingAgent:
 
     def _get_dynamic_threshold(self, importance: int) -> Dict[str, float]:
         """
-        🔥 P3修复: 根据伏笔重要性动态计算阈值
+        🔥 P3修复 + P4升级: 根据伏笔重要性动态计算阈值
 
         策略:
         - Core Mystery (8-10): 严格匹配，阈值更高，避免误判
         - Subplot (4-7): 标准阈值
         - Flavor (1-3): 宽松阈值，容易匹配
 
+        🔥 P4升级:
+        - 增加关键词权重比例 (防止仅靠语义相似度误判)
+        - 增加实体匹配权重
+        - 增加明确标记词检测
+
         Returns:
-            Dict with 'high', 'medium', 'low' thresholds and score weights
+            Dict with thresholds and score weights
         """
         if importance >= 8:  # Core Mystery - 需要更严格
             return {
-                "high_threshold": 0.80,   # 高相似度阈值
-                "medium_threshold": 0.70,
-                "low_threshold": 0.60,
-                "semantic_weight": 70,    # 语义权重更高
+                "high_threshold": 0.85,   # 🔥 P4: 提高到0.85
+                "medium_threshold": 0.75,
+                "low_threshold": 0.65,
+                "semantic_weight": 50,    # 🔥 P4: 降低语义权重
                 "keyword_weight": 30,
-                "pass_score": 60          # 通过分数更高
+                "entity_weight": 20,      # 🔥 P4新增: 实体匹配权重
+                "pass_score": 70,         # 🔥 P4: 提高通过分数
+                "require_entity_match": True  # 🔥 P4: 核心伏笔必须有实体匹配
             }
         elif importance >= 4:  # Subplot - 标准
             return {
-                "high_threshold": 0.75,
-                "medium_threshold": 0.65,
-                "low_threshold": 0.55,
-                "semantic_weight": 60,
-                "keyword_weight": 40,
-                "pass_score": 50
+                "high_threshold": 0.78,
+                "medium_threshold": 0.68,
+                "low_threshold": 0.58,
+                "semantic_weight": 55,
+                "keyword_weight": 30,
+                "entity_weight": 15,
+                "pass_score": 55,
+                "require_entity_match": False
             }
         else:  # Flavor - 宽松
             return {
@@ -139,18 +148,78 @@ class ForeshadowingAgent:
                 "medium_threshold": 0.58,
                 "low_threshold": 0.48,
                 "semantic_weight": 50,
-                "keyword_weight": 50,
-                "pass_score": 40
+                "keyword_weight": 35,
+                "entity_weight": 15,
+                "pass_score": 45,
+                "require_entity_match": False
             }
+
+    def _extract_key_entities(self, text: str) -> set:
+        """
+        🔥 P4新增: 提取文本中的关键实体
+
+        识别:
+        - 人名 (中文2-4字)
+        - 地名 (带"山/谷/城/宗/门/派"等后缀)
+        - 物品名 (带"剑/刀/丹/符/令"等后缀)
+        """
+        entities = set()
+
+        # 人名模式 (简化: 2-4个中文字符)
+        import re
+        name_pattern = r'[\u4e00-\u9fa5]{2,4}'
+        potential_names = re.findall(name_pattern, text)
+        for name in potential_names:
+            # 过滤常见非人名词汇
+            if name not in ['但是', '因为', '所以', '如果', '虽然', '就是', '这个', '那个',
+                            '什么', '怎么', '为什么', '突然', '居然', '竟然', '已经', '可能']:
+                entities.add(name)
+
+        # 地名模式
+        location_pattern = r'[\u4e00-\u9fa5]{2,6}(?:山|谷|城|宗|门|派|殿|阁|洞|府|国|域|界)'
+        entities.update(re.findall(location_pattern, text))
+
+        # 物品模式
+        item_pattern = r'[\u4e00-\u9fa5]{2,6}(?:剑|刀|丹|符|令|珠|镜|钟|鼎|塔|戒|环)'
+        entities.update(re.findall(item_pattern, text))
+
+        return entities
+
+    def _check_explicit_resolution_markers(self, outline: str, hook_content: str) -> bool:
+        """
+        🔥 P4新增: 检查是否有明确的回收标记词
+
+        如果大纲中明确提到"揭示/揭露/真相/解开/谜底"等词汇,
+        且与伏笔内容相关,则认为是明确的回收信号
+        """
+        resolution_markers = [
+            '揭示', '揭露', '揭开', '揭穿', '真相', '谜底', '解开', '解答',
+            '原来', '终于明白', '恍然大悟', '真正原因', '背后的', '秘密是',
+            '答案是', '终于知道', '事实是', '发现了', '得知了'
+        ]
+
+        outline_lower = outline.lower()
+        hook_lower = hook_content.lower()
+
+        for marker in resolution_markers:
+            if marker in outline_lower:
+                # 检查伏笔中的关键词是否也在大纲中
+                hook_keywords = set(hook_content[i:i+3] for i in range(len(hook_content)-2) if len(hook_content[i:i+3].strip()) >= 2)
+                for kw in hook_keywords:
+                    if kw in outline:
+                        return True
+        return False
 
     def detect_outline_resolutions(self, outline: str) -> List[int]:
         """
-        🔥 P1升级 + P3修复: 语义嵌入匹配 + 关键词双重验证 + 动态阈值
+        🔥 P1升级 + P3修复 + P4升级: 语义嵌入匹配 + 关键词双重验证 + 动态阈值 + 实体匹配
 
         策略:
-        1. 使用嵌入向量计算语义相似度 (主要判断)
+        1. 使用嵌入向量计算语义相似度
         2. 关键词匹配作为辅助验证
         3. 🔥 P3修复: 根据importance动态调整阈值，避免误判核心伏笔
+        4. 🔥 P4新增: 实体匹配验证 (人名/地名/物品名)
+        5. 🔥 P4新增: 明确回收标记词检测
 
         Returns:
             List[int]: 可能被回收的伏笔ID列表
@@ -175,6 +244,9 @@ class ForeshadowingAgent:
             print(f"   ⚠️ 嵌入生成失败,回退到关键词匹配: {e}")
             outline_embedding = None
 
+        # 🔥 P4新增: 提取大纲中的实体
+        outline_entities = self._extract_key_entities(outline)
+
         for row in rows:
             hook_id, chapter_created, hook_content, importance = row
             if importance is None:
@@ -183,6 +255,7 @@ class ForeshadowingAgent:
             # 🔥 P3修复: 获取动态阈值
             thresholds = self._get_dynamic_threshold(importance)
             score = 0.0
+            entity_matched = False
 
             # 策略1: 语义相似度
             if outline_embedding:
@@ -216,11 +289,39 @@ class ForeshadowingAgent:
                 match_rate = matches / len(keywords)
                 score += match_rate * thresholds["keyword_weight"]
 
+            # 🔥 P4新增: 策略3 - 实体匹配
+            hook_entities = self._extract_key_entities(hook_content)
+            if hook_entities and outline_entities:
+                common_entities = hook_entities & outline_entities
+                if common_entities:
+                    entity_matched = True
+                    entity_match_rate = len(common_entities) / len(hook_entities)
+                    score += entity_match_rate * thresholds.get("entity_weight", 15)
+                    if len(common_entities) >= 2:
+                        score += 10  # 多实体匹配奖励
+
+            # 🔥 P4新增: 策略4 - 明确回收标记词检测
+            if self._check_explicit_resolution_markers(outline, hook_content):
+                score += 15  # 明确标记词奖励
+                print(f"   💡 检测到明确回收标记词 (伏笔ID:{hook_id})")
+
+            # 🔥 P4修复: 核心伏笔必须有实体匹配才能被判定为回收
+            require_entity = thresholds.get("require_entity_match", False)
+            if require_entity and not entity_matched:
+                # 核心伏笔没有实体匹配,提高通过门槛
+                effective_pass_score = thresholds["pass_score"] * 1.3
+            else:
+                effective_pass_score = thresholds["pass_score"]
+
             # 🔥 使用动态通过分数
-            if score >= thresholds["pass_score"]:
+            if score >= effective_pass_score:
                 potential_resolutions.append(hook_id)
                 imp_label = "Core" if importance >= 8 else ("Subplot" if importance >= 4 else "Flavor")
-                print(f"   🎯 检测到可能回收伏笔 ID:{hook_id} [{imp_label}] (Score:{score:.1f}, Threshold:{thresholds['pass_score']})")
+                entity_info = f", 实体匹配:{len(hook_entities & outline_entities) if hook_entities else 0}" if entity_matched else ""
+                print(f"   🎯 检测到可能回收伏笔 ID:{hook_id} [{imp_label}] (Score:{score:.1f}, Threshold:{effective_pass_score:.1f}{entity_info})")
+            elif importance >= 8 and score >= thresholds["pass_score"] * 0.8:
+                # 核心伏笔接近阈值但未达到,给出提示
+                print(f"   ⚠️ 核心伏笔 ID:{hook_id} 接近回收阈值 (Score:{score:.1f}/{effective_pass_score:.1f}), 建议人工确认")
 
         return potential_resolutions
 

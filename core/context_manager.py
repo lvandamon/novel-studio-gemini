@@ -81,15 +81,17 @@ class ContextManager:
         self.intent_chain = CONTEXT_INTENT_PROMPT | self.llm | StrOutputParser()
         self.compressor_chain = CONTEXT_COMPRESSION_PROMPT | self.llm | StrOutputParser()
 
-    def _adjust_budget_for_chapter(self, chapter_num: int, active_characters_count: int = 0):
+    def _adjust_budget_for_chapter(self, chapter_num: int, active_characters_count: int = 0,
+                                     historical_usage: int = None):
         """
-        🔥 P1新增: 根据章节数和场景复杂度动态调整预算
+        🔥 P1新增 + P4升级: 根据章节数和场景复杂度动态调整预算
 
         策略:
         - 前100章: 基础预算 (64k)
         - 100-500章: 线性增长到 80k
         - 500章+: 最大预算 (96k)
         - 多角色场景 (>7人): 额外 +10%
+        - 🔥 P4新增: 基于历史真实Token使用量自适应调整
         """
         base = self.base_total_budget
 
@@ -106,8 +108,79 @@ class ContextManager:
         if active_characters_count > 7:
             self.total_budget = int(self.total_budget * 1.1)
 
+        # 🔥 P4新增: 基于历史使用量的自适应调整
+        if historical_usage is not None and historical_usage > 0:
+            # 如果历史使用量接近或超过当前预算,自动扩容
+            usage_ratio = historical_usage / self.total_budget
+            if usage_ratio > 0.9:
+                # 使用量超过90%,扩容20%
+                self.total_budget = int(self.total_budget * 1.2)
+                print(f"   📈 Context预算自适应扩容: {usage_ratio:.1%} -> +20%")
+            elif usage_ratio > 0.8:
+                # 使用量超过80%,扩容10%
+                self.total_budget = int(self.total_budget * 1.1)
+
         # 上限保护
         self.total_budget = min(self.total_budget, self.max_total_budget)
+
+    def get_real_token_usage(self, content: str) -> Dict[str, int]:
+        """
+        🔥 P4新增: 获取真实Token使用统计
+
+        Returns:
+            Dict with 'total', 'global', 'local', 'retrieval' token counts
+        """
+        return {
+            "total": self._count_tokens(content),
+            "budget": self.total_budget,
+            "usage_rate": round(self._count_tokens(content) / max(1, self.total_budget), 3)
+        }
+
+    def estimate_context_complexity(self, chapter_num: int, active_characters: List[str],
+                                     outline: str) -> Dict[str, Any]:
+        """
+        🔥 P4新增: 预估上下文复杂度
+
+        用于在生成前预判是否需要调整预算
+
+        Returns:
+            Dict with complexity metrics and recommendations
+        """
+        complexity = {
+            "character_count": len(active_characters),
+            "outline_tokens": self._count_tokens(outline),
+            "estimated_base": 0,
+            "risk_level": "LOW",
+            "recommendations": []
+        }
+
+        # 基础估算
+        base_estimate = 5000  # 世界圣经 + 基础状态
+        per_character = 1500  # 每角色预估
+        outline_multiplier = 3  # 大纲衍生内容倍数
+
+        complexity["estimated_base"] = (
+            base_estimate +
+            len(active_characters) * per_character +
+            complexity["outline_tokens"] * outline_multiplier
+        )
+
+        # 风险评估
+        usage_rate = complexity["estimated_base"] / self.total_budget
+
+        if usage_rate > 0.9:
+            complexity["risk_level"] = "HIGH"
+            complexity["recommendations"].append("建议减少活跃角色数量或简化大纲")
+        elif usage_rate > 0.7:
+            complexity["risk_level"] = "MEDIUM"
+            complexity["recommendations"].append("可能需要启用压缩策略")
+        else:
+            complexity["risk_level"] = "LOW"
+
+        if len(active_characters) > 10:
+            complexity["recommendations"].append("建议启用角色限流分批处理")
+
+        return complexity
 
     def _count_tokens(self, text: str) -> int:
         return len(self.encoder.encode(text))

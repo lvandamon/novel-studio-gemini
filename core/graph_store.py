@@ -34,12 +34,26 @@ class GraphManager:
         self.password = password or os.getenv("NEO4J_PASSWORD", "password")
         self.driver = None
         self.db_path = db_path  # 🔥 P3修复: SQL降级备份数据库路径
+
+        # 🔥 P4新增: 连接健康监控
+        self._last_health_check = 0
+        self._health_check_interval = 300  # 5分钟健康检查间隔
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 3
+        self._reconnect_backoff = 1  # 重连退避时间(秒)
+        self._is_degraded_mode = False  # 是否处于降级模式
+
         self._connect()
 
     def _connect(self):
         """
-        🔥 P0修复: 建立连接,失败则进入降级模式(Graceful Degradation)
+        🔥 P0修复 + P4升级: 建立连接,失败则进入降级模式(Graceful Degradation)
         降级后所有图谱操作返回空结果,不中断流程
+
+        P4新增:
+        1. 指数退避重连
+        2. 连续失败计数
+        3. 自动降级/恢复机制
         """
         try:
             if self.driver:
@@ -47,10 +61,74 @@ class GraphManager:
             self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.driver.verify_connectivity()
             print("✅ Neo4j 连接成功")
+
+            # 🔥 P4新增: 连接成功,重置状态
+            self._consecutive_failures = 0
+            self._reconnect_backoff = 1
+            if self._is_degraded_mode:
+                print("✅ Neo4j 已从降级模式恢复!")
+                self._is_degraded_mode = False
+            self._last_health_check = time.time()
+
         except Exception as e:
-            print(f"⚠️ Neo4j 连接失败,进入降级模式(Degraded Mode): {e}")
-            print("   系统将继续运行,但关系图谱功能不可用。依赖纯向量+SQL记忆。")
+            self._consecutive_failures += 1
+            print(f"⚠️ Neo4j 连接失败 (第{self._consecutive_failures}次): {e}")
+
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                if not self._is_degraded_mode:
+                    print("⚠️ 连续失败次数过多,进入降级模式(Degraded Mode)")
+                    print("   系统将继续运行,但关系图谱功能不可用。依赖纯向量+SQL记忆。")
+                    self._is_degraded_mode = True
             self.driver = None  # 明确标记为不可用
+
+    def health_check(self) -> Dict[str, Any]:
+        """
+        🔥 P4新增: 连接健康检查
+
+        Returns:
+            Dict with keys: 'connected', 'degraded_mode', 'failures', 'last_check'
+        """
+        current_time = time.time()
+
+        # 如果距离上次检查超过间隔,进行新的检查
+        if current_time - self._last_health_check >= self._health_check_interval:
+            self._last_health_check = current_time
+
+            if self.driver:
+                try:
+                    self.driver.verify_connectivity()
+                    self._consecutive_failures = 0
+                    if self._is_degraded_mode:
+                        print("✅ Neo4j 健康检查通过,退出降级模式!")
+                        self._is_degraded_mode = False
+                except Exception as e:
+                    print(f"⚠️ Neo4j 健康检查失败: {e}")
+                    self._consecutive_failures += 1
+            else:
+                # 尝试重新连接
+                if not self._is_degraded_mode or self._consecutive_failures < 10:
+                    print(f"   🔄 尝试重新连接 Neo4j (退避 {self._reconnect_backoff}秒)...")
+                    time.sleep(self._reconnect_backoff)
+                    self._reconnect_backoff = min(self._reconnect_backoff * 2, 60)  # 最大60秒
+                    self._connect()
+
+        return {
+            "connected": self.driver is not None and not self._is_degraded_mode,
+            "degraded_mode": self._is_degraded_mode,
+            "consecutive_failures": self._consecutive_failures,
+            "last_check": self._last_health_check
+        }
+
+    def try_reconnect(self) -> bool:
+        """
+        🔥 P4新增: 手动触发重连
+
+        Returns:
+            bool: 重连是否成功
+        """
+        print("   🔄 手动触发 Neo4j 重连...")
+        self._connect()
+        return self.driver is not None and not self._is_degraded_mode
 
     def close(self):
         if self.driver:

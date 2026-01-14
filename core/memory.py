@@ -1964,12 +1964,13 @@ class MemoryManager:
 
     def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False) -> str:
         """
-        🔥 P0优化版: 分级混合检索 (Tri-Stage Retrieval) with Chapter-Partitioned Search
+        🔥 P0优化版 + P4修复: 分级混合检索 (Tri-Stage Retrieval) with Chapter-Partitioned Search
 
         优化策略:
         1. 章节分区: 仅检索近期窗口(500章)避免全量扫描
         2. 全局重要记忆: 并行检索高重要性内容(World Bible/Core Events)
         3. 时间衰减: Re-ranking提升近期记忆权重
+        4. 🔥 P4新增: 冷启动保护 - 前100章检索质量保障
 
         性能提升: 200万字场景下从O(n)降至O(log n), 预计10秒→<2秒
         """
@@ -1977,6 +1978,10 @@ class MemoryManager:
 
         # --- Stage 0: 🔥 动态窗口计算 (P0新增) ---
         recent_window = 500  # 默认窗口: 最近500章
+
+        # 🔥 P4新增: 冷启动检测 (前100章特殊处理)
+        is_cold_start = current_chapter is not None and current_chapter <= 100
+        cold_start_similarity_threshold = 0.3  # 冷启动期间的相似度阈值
 
         # 自适应窗口: 早期小说扩大窗口,后期严格限制
         if current_chapter is not None:
@@ -2043,6 +2048,26 @@ class MemoryManager:
 
         # 合并结果
         semantic_results = recent_results + global_results
+
+        # 🔥 P4新增: 冷启动保护 - 过滤低质量检索结果
+        if is_cold_start:
+            filtered_results = []
+            for doc, score in semantic_results:
+                # 冷启动期间只保留高相似度或高优先级结果
+                doc_type = doc.metadata.get("type", "")
+                is_high_priority = doc_type in ["bible_truth", "world_setting", "character_core"]
+                is_high_similarity = score >= cold_start_similarity_threshold
+
+                if is_high_priority or is_high_similarity:
+                    filtered_results.append((doc, score))
+                else:
+                    # 低相似度结果降权但不完全丢弃
+                    if score >= 0.2:
+                        filtered_results.append((doc, score * 0.5))
+
+            semantic_results = filtered_results
+            if len(semantic_results) < k // 2:
+                print(f"   ⚠️ 冷启动警告: 向量检索数据稀疏(仅{len(semantic_results)}条有效结果)")
 
         for doc, score in semantic_results:
             # Calculate Time Decay

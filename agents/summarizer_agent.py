@@ -15,22 +15,50 @@ class SummarizerAgent:
         # 🔥 P3修复: 重要事件类型定义
         self.critical_event_types = ["Climax", "Major_Battle", "Death", "Revelation", "Transformation", "Arc_End"]
 
-    def trigger_aggregations(self, chapter_num: int, force_critical: bool = False, critical_reason: str = None):
+        # 🔥 P4新增: 灵活聚合配置
+        self.aggregation_config = {
+            "base_batch_size": 10,       # 基础批次大小
+            "min_batch_size": 5,         # 最小批次大小
+            "max_batch_size": 15,        # 最大批次大小
+            "volume_batch_count": 10,    # 每卷包含的批次数
+            "adaptive_mode": True        # 是否启用自适应模式
+        }
+
+        # 🔥 P4新增: 单元(Arc)边界追踪
+        self._arc_boundaries: List[int] = []
+        self._last_arc_chapter: int = 0
+
+    def trigger_aggregations(self, chapter_num: int, force_critical: bool = False,
+                              critical_reason: str = None, arc_ended: bool = False,
+                              arc_name: str = None):
         """
-        🔥 P3升级: 触发分级聚合逻辑 (Fractal Aggregation Trigger)
+        🔥 P3升级 + P4升级: 触发分级聚合逻辑 (Fractal Aggregation Trigger)
 
         策略:
-        1. Level 1 (Batch-10): 每 10 章触发一次 (10, 20, 30...)
-        2. Level 2 (Volume/Batch-100): 每 100 章触发一次 (100, 200...)
+        1. Level 1 (Batch): 每 N 章触发一次 (N可配置,默认10)
+        2. Level 2 (Volume): 每 M 个Batch触发一次
         3. 🔥 P3新增: 重要事件触发额外聚合 (Critical Event Trigger)
+        4. 🔥 P4新增: 单元(Arc)边界触发聚合
+        5. 🔥 P4新增: 自适应批次大小
 
         Args:
             chapter_num: 当前章节号
             force_critical: 是否强制触发关键聚合
             critical_reason: 触发原因描述
+            arc_ended: 是否为单元结束点
+            arc_name: 结束的单元名称
         """
         if chapter_num <= 0:
             return
+
+        batch_size = self._get_adaptive_batch_size(chapter_num)
+
+        # 🔥 P4新增: 单元(Arc)结束触发聚合
+        if arc_ended:
+            print(f"📚 [Summarizer] 单元结束触发聚合: {arc_name}")
+            self._trigger_arc_boundary_aggregation(chapter_num, arc_name)
+            self._arc_boundaries.append(chapter_num)
+            self._last_arc_chapter = chapter_num
 
         # 🔥 P3新增: 检查是否有重要事件需要立即聚合
         should_critical_aggregate = force_critical or self._check_critical_events(chapter_num)
@@ -40,19 +68,127 @@ class SummarizerAgent:
             print(f"🚨 [Summarizer] 重要事件触发紧急聚合: {reason}")
             self._trigger_critical_aggregation(chapter_num)
 
-        # Level 1: 每 10 章聚合一次
-        if chapter_num % 10 == 0:
-            start = chapter_num - 9
+        # Level 1: 基于自适应批次大小聚合
+        if self._should_trigger_batch_aggregation(chapter_num, batch_size):
+            start = self._calculate_batch_start(chapter_num, batch_size)
             end = chapter_num
-            print(f"🔄 [Summarizer] 触发 L1 聚合 (Ch{start}-{end})...")
+            print(f"🔄 [Summarizer] 触发 L1 聚合 (Ch{start}-{end}, batch_size={batch_size})...")
             self._aggregate_range(level="batch_10", start=start, end=end, source_level="chapter")
 
-        # Level 2: 每 100 章聚合一次 (基于 Level 1 的摘要)
-        if chapter_num % 100 == 0:
-            start = chapter_num - 99
+        # Level 2: 基于批次数量聚合
+        if self._should_trigger_volume_aggregation(chapter_num):
+            start = self._calculate_volume_start(chapter_num)
             end = chapter_num
             print(f"🔄 [Summarizer] 触发 L2 卷级聚合 (Ch{start}-{end})...")
             self._aggregate_range(level="volume", start=start, end=end, source_level="batch_10")
+
+    def _get_adaptive_batch_size(self, chapter_num: int) -> int:
+        """
+        🔥 P4新增: 获取自适应批次大小
+
+        策略:
+        - 前50章: 较小批次 (5章) - 便于细粒度回顾
+        - 50-200章: 标准批次 (10章)
+        - 200章+: 可以稍大批次 (12-15章)
+        """
+        if not self.aggregation_config["adaptive_mode"]:
+            return self.aggregation_config["base_batch_size"]
+
+        if chapter_num <= 50:
+            return self.aggregation_config["min_batch_size"]
+        elif chapter_num <= 200:
+            return self.aggregation_config["base_batch_size"]
+        else:
+            # 渐进增大,但不超过最大值
+            extra = min((chapter_num - 200) // 100, 5)
+            return min(
+                self.aggregation_config["base_batch_size"] + extra,
+                self.aggregation_config["max_batch_size"]
+            )
+
+    def _should_trigger_batch_aggregation(self, chapter_num: int, batch_size: int) -> bool:
+        """
+        🔥 P4新增: 判断是否应该触发批次聚合
+
+        考虑因素:
+        1. 章节数是否达到批次边界
+        2. 是否刚经过单元(Arc)边界
+        """
+        # 标准批次边界
+        if chapter_num % batch_size == 0:
+            return True
+
+        # 检查是否在单元边界后的合适位置
+        if self._arc_boundaries:
+            last_arc = self._arc_boundaries[-1]
+            chapters_since_arc = chapter_num - last_arc
+            if chapters_since_arc >= batch_size:
+                return True
+
+        return False
+
+    def _should_trigger_volume_aggregation(self, chapter_num: int) -> bool:
+        """🔥 P4新增: 判断是否应该触发卷级聚合"""
+        batch_count = self.aggregation_config["volume_batch_count"]
+        batch_size = self._get_adaptive_batch_size(chapter_num)
+        volume_size = batch_count * batch_size
+
+        return chapter_num % volume_size == 0
+
+    def _calculate_batch_start(self, chapter_num: int, batch_size: int) -> int:
+        """🔥 P4新增: 计算批次起始章节"""
+        # 如果有单元边界,从边界后开始
+        if self._arc_boundaries:
+            last_arc = self._arc_boundaries[-1]
+            if chapter_num - last_arc < batch_size * 2:
+                return last_arc + 1
+
+        return max(1, chapter_num - batch_size + 1)
+
+    def _calculate_volume_start(self, chapter_num: int) -> int:
+        """🔥 P4新增: 计算卷级聚合起始章节"""
+        batch_count = self.aggregation_config["volume_batch_count"]
+        batch_size = self._get_adaptive_batch_size(chapter_num)
+        volume_size = batch_count * batch_size
+
+        return max(1, chapter_num - volume_size + 1)
+
+    def _trigger_arc_boundary_aggregation(self, chapter_num: int, arc_name: str = None):
+        """
+        🔥 P4新增: 单元边界聚合
+
+        当一个叙事单元(Arc)结束时,生成该单元的综述
+        """
+        # 计算单元范围
+        start = self._last_arc_chapter + 1 if self._last_arc_chapter > 0 else 1
+        end = chapter_num
+
+        if end <= start:
+            return
+
+        # 获取源摘要
+        sources = []
+        for i in range(start, end + 1):
+            s = self.memory.get_chapter_summary(i)
+            if s and s != "暂无摘要。":
+                sources.append(f"[Ch{i}]: {s}")
+
+        if not sources:
+            print(f"   ⚠️ Arc聚合失败: 无可用摘要 ({start}-{end})")
+            return
+
+        try:
+            arc_summary = self.batch_chain.invoke({
+                "summaries": "\n".join(sources)
+            })
+
+            # 存储为 arc 级别
+            level_name = f"arc_{arc_name}" if arc_name else "arc"
+            self.memory.save_aggregated_summary(level_name, start, end, arc_summary)
+            print(f"   ✅ [Summarizer] Arc聚合完成: {arc_name or 'Unknown'} (Ch{start}-{end}, {len(arc_summary)}字)")
+
+        except Exception as e:
+            print(f"   ❌ [Summarizer] Arc聚合出错: {e}")
 
     def _check_critical_events(self, chapter_num: int) -> bool:
         """

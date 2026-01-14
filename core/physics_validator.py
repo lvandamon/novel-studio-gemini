@@ -87,17 +87,27 @@ class PhysicsValidator:
             "双腿动作": r"(双腿|两腿|双足).{0,5}(并|分|站|踏|跳|蹲|跃|纵)"
         }
 
-        # 🔥 P3新增: 排除规则 (这些情况不算违规)
+        # 🔥 P3新增 + P4升级: 排除规则 (这些情况不算违规)
         self.exclusion_patterns = {
             # 回忆/描述过去的情况
-            "回忆": r"(曾经|以前|往日|昔日|当初|想起|记得|回想)",
+            "回忆": r"(曾经|以前|往日|昔日|当初|想起|记得|回想|那时|当年|年前|从前)",
             # 幻觉/梦境
-            "幻觉": r"(幻觉|幻象|幻影|梦中|梦里|恍惚间|仿佛)",
+            "幻觉": r"(幻觉|幻象|幻影|梦中|梦里|恍惚间|仿佛|好像|似乎|像是|如同|宛如)",
             # 他人视角描述
             "旁白": r"(他的|她的|其).{0,3}(左手|右手|双手|左腿|右腿)",
             # 疗伤/恢复描述
-            "恢复": r"(治愈|痊愈|恢复|再生|重生|接回|续上)"
+            "恢复": r"(治愈|痊愈|恢复|再生|重生|接回|续上|治好|医好)",
+            # 🔥 P4新增: 假设/比喻语境
+            "假设": r"(如果|假如|若是|倘若|要是|本可以|原本能|本来可以)",
+            # 🔥 P4新增: 否定语境
+            "否定": r"(再也不能|无法|不能|做不到|失去了|没了)",
+            # 🔥 P4新增: 他人代劳
+            "代劳": r"(帮.{0,4}(持|握|拿|扶)|替.{0,4}(持|握|拿|扶)|搀扶)"
         }
+
+        # 🔥 P4新增: 上下文窗口扩展 (用于深度分析)
+        self.extended_context_window = 100  # 扩展上下文窗口
+        self.sentence_delimiters = r'[。！？.!?\n]'  # 句子分隔符
 
         # 🔥 P3新增: 严重动作词库 (残废部位绝对不能做的)
         self.severe_actions = {
@@ -159,32 +169,107 @@ class PhysicsValidator:
 
     def _should_exclude_context(self, context: str) -> bool:
         """
-        🔥 P3新增: 检查上下文是否应该排除 (回忆/幻觉/旁白等)
+        🔥 P3新增 + P4升级: 检查上下文是否应该排除 (回忆/幻觉/旁白等)
+
+        P4升级: 增加上下文深度分析,不仅检查当前句,还检查前后句
         """
         for excl_type, pattern in self.exclusion_patterns.items():
             if re.search(pattern, context):
                 return True
         return False
 
+    def _get_sentence_context(self, text: str, position: int) -> str:
+        """
+        🔥 P4新增: 获取完整的句子上下文
+
+        Args:
+            text: 完整文本
+            position: 关键词位置
+
+        Returns:
+            包含该位置的完整句子
+        """
+        # 向前查找句子起点
+        start = position
+        while start > 0 and not re.match(self.sentence_delimiters, text[start-1]):
+            start -= 1
+
+        # 向后查找句子终点
+        end = position
+        while end < len(text) and not re.match(self.sentence_delimiters, text[end]):
+            end += 1
+
+        return text[max(0, start-20):min(len(text), end+20)]
+
+    def _analyze_subject(self, context: str, char_name: str, part_keywords: List[str]) -> bool:
+        """
+        🔥 P4新增: 分析动作主语是否为指定角色
+
+        检查动作描述中的部位是否属于当前角色,还是在描述他人
+
+        Returns:
+            True = 动作主语是当前角色 (需要检查违规)
+            False = 动作主语是其他人 (不算违规)
+        """
+        # 检查是否有明确的他人代词在部位前
+        other_possessive = [
+            r'他的.{0,3}(' + '|'.join(part_keywords) + ')',
+            r'她的.{0,3}(' + '|'.join(part_keywords) + ')',
+            r'其.{0,3}(' + '|'.join(part_keywords) + ')',
+            r'对方的.{0,3}(' + '|'.join(part_keywords) + ')',
+            r'敌人的.{0,3}(' + '|'.join(part_keywords) + ')',
+        ]
+
+        for pattern in other_possessive:
+            if re.search(pattern, context):
+                return False  # 是在描述他人
+
+        # 检查是否有明确的角色名在部位前 (且不是当前角色)
+        # 例如: "张三的左手" (当char_name != "张三"时不算违规)
+        name_pattern = r'[\u4e00-\u9fa5]{2,4}的.{0,3}(' + '|'.join(part_keywords) + ')'
+        matches = re.findall(name_pattern, context)
+        for match in matches:
+            # 提取名字
+            name_match = re.search(r'([\u4e00-\u9fa5]{2,4})的', context)
+            if name_match:
+                mentioned_name = name_match.group(1)
+                if mentioned_name != char_name and mentioned_name not in char_name:
+                    return False  # 是在描述其他角色
+
+        return True  # 默认认为是当前角色
+
     def _check_severed_limb_usage(self, draft: str, char_name: str, part_name: str) -> Dict | None:
         """
-        🔥 P3升级: 检查断肢使用违规 (增加排除规则)
+        🔥 P3升级 + P4升级: 检查断肢使用违规 (增加排除规则 + 主语分析)
         """
-        char_contexts = self._extract_character_contexts(draft, char_name)
+        char_contexts = self._extract_character_contexts(draft, char_name, context_window=self.extended_context_window)
+
+        keywords = self.body_parts.get(part_name, [part_name])
 
         for context in char_contexts:
             # 🔥 P3新增: 排除回忆/幻觉等场景
             if self._should_exclude_context(context):
                 continue
 
-            keywords = self.body_parts.get(part_name, [part_name])
             for keyword in keywords:
                 if keyword in context:
+                    # 🔥 P4新增: 分析动作主语
+                    if not self._analyze_subject(context, char_name, keywords):
+                        continue  # 不是当前角色的动作
+
                     # 检查所有动作类型
                     for action_type, pattern in self.action_patterns.items():
                         # 检测动作模式
                         if re.search(f"{keyword}.{{0,8}}{pattern}", context) or \
                            re.search(f"{pattern}.{{0,8}}{keyword}", context):
+
+                            # 🔥 P4新增: 二次确认 - 扩展上下文再检查一次排除规则
+                            keyword_pos = context.find(keyword)
+                            if keyword_pos >= 0:
+                                extended_ctx = self._get_sentence_context(draft, draft.find(context[:30]) + keyword_pos if context[:30] in draft else 0)
+                                if self._should_exclude_context(extended_ctx):
+                                    continue
+
                             return {
                                 "type": "SEVERED_LIMB_USAGE",
                                 "severity": "CRITICAL",
@@ -296,13 +381,37 @@ class PhysicsValidator:
         return None
 
     def _extract_character_contexts(self, text: str, char_name: str, context_window: int = 50) -> List[str]:
-        """提取角色相关的上下文片段"""
+        """
+        🔥 P4升级: 提取角色相关的上下文片段
+
+        改进:
+        1. 支持可配置的上下文窗口
+        2. 尝试扩展到完整句子边界
+        3. 去重处理
+        """
         contexts = []
+        seen = set()
+
         # 找到所有提及该角色的位置
-        for match in re.finditer(char_name, text):
+        for match in re.finditer(re.escape(char_name), text):
+            # 基础窗口
             start = max(0, match.start() - context_window)
             end = min(len(text), match.end() + context_window)
-            contexts.append(text[start:end])
+
+            # 尝试扩展到句子边界
+            while start > 0 and text[start] not in '。！？.!?\n' and (match.start() - start) < context_window * 1.5:
+                start -= 1
+            while end < len(text) and text[end-1] not in '。！？.!?\n' and (end - match.end()) < context_window * 1.5:
+                end += 1
+
+            context = text[start:end]
+
+            # 去重
+            context_key = context[:50]
+            if context_key not in seen:
+                seen.add(context_key)
+                contexts.append(context)
+
         return contexts
 
     def validate_item_usage(self, draft: str, char_name: str, item_name: str) -> Dict | None:

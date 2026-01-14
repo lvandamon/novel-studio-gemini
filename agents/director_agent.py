@@ -6,6 +6,7 @@ from core.llm import get_deepseek_reasoner
 from core.prompts import DIRECTOR_EVALUATE_PROMPT, DIRECTOR_SYSTEM_PROMPT
 from core.memory import MemoryManager
 from core.chaos import ChaosEngine
+from core.json_repair import repair_and_parse, clean_json, JSONRepairError
 
 class DirectorAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -17,32 +18,11 @@ class DirectorAgent:
 
     def _clean_json(self, text: str) -> str:
         """
-        Robust JSON extractor for Reasoner models that might output thoughts.
-        """
-        # 1. Remove <think> blocks if present
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        
-        # 2. Try to find markdown JSON block
-        match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if match:
-            text = match.group(1)
-        else:
-            # 3. Try to find the first valid JSON object enclosed in braces
-            match = re.search(r'(\{.*\})', text, re.DOTALL)
-            if match:
-                text = match.group(1)
-            
-        # 4. 🔥 P3新增: 清理非法控制字符 (解决 JSONDecodeError)
-        # 替换 JSON 字符串中未转义的换行符和制表符
-        text = text.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-        
-        # 但我们刚才可能把真正的 JSON 结构括号也给弄乱了，或者把属性间的换行弄乱了。
-        # 更好的做法是只处理字符串内部的换行。
-        # 不过为了简单，我们先尝试最强力的清理：
-        # 重新修复被过度转义的结构字符
-        text = text.replace('\\n{', '{').replace('}\\n', '}').replace('\\n"', '"').replace('"\\n', '"').replace('\\n:', ':').replace(':\\n', ':').replace('\\n,', ',').replace(',\\n', ',')
+        🔥 P4升级: 使用专业的JSON修复模块
 
-        return text.strip()
+        替代原来脆弱的正则处理
+        """
+        return clean_json(text)
 
     def _fetch_structural_context(self, current_chapter: int) -> str:
         """
