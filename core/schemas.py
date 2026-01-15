@@ -10,6 +10,26 @@ class RealityLayer(str, Enum):
     HISTORY = "History"
     SIMULATION = "Simulation"
 
+class AnchorStatus(str, Enum):
+    ACTIVE = "active"           # 当前生效
+    ARCHIVED = "archived"       # 历史版本 (已过时)
+    SHATTERED = "shattered"     # 被剧情击碎 (如: "不杀"原则被打破)
+    TRANSCENDED = "transcended" # 升华/融合 (如: "复仇"升级为"大义")
+
+class CharacterEpochSchema(BaseModel):
+    name: str  # e.g. "青涩少年期", "宗门复仇期"
+    description: str # 这一时期的主要性格特征描述
+    start_chapter: int
+    trigger_event: str # 导致进入这一时期的关键事件
+
+class CharacterEvolutionSchema(BaseModel):
+    """用于 Archivist 提取角色性格质变事件"""
+    character_name: str
+    new_epoch_name: str
+    trigger_reason: str
+    shattered_anchors: List[str] = Field(default_factory=list) # 被打破的旧锚点内容
+    new_anchors: List[Dict[str, str]] = Field(default_factory=list) # {"category": "...", "content": "..."}
+
 class ArcStatus(str, Enum):
     PLANNED = "planned"
     ACTIVE = "active"
@@ -135,5 +155,6 @@ class ChapterExtractionSchema(BaseModel):
     relationships: List[GraphTripletSchema] = Field(default_factory=list)
     new_foreshadowing: List[ForeshadowingSchema]
     resolved_foreshadowing_ids: List[int] = Field(default_factory=list)
+    character_evolutions: List[CharacterEvolutionSchema] = Field(default_factory=list) # 🔥 P9新增: 角色性格演化事件
     world_updates: List[Dict[str, Any]] = Field(default_factory=list)
     current_date: str = Field(..., description="更新后的世界日期")

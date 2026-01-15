@@ -12,6 +12,7 @@ from langchain_core.output_parsers import StrOutputParser
 from core.graph_store import GraphManager
 from core.llm import get_deepseek_chat
 from core.prompts import ENTITY_EXTRACTION_PROMPT
+from core.character_evolution import DynamicAnchorManager
 
 class MemoryManager:
     def __init__(self, db_path: str = "data/novel.db", vector_db_path: str = "data/vector_store"):
@@ -55,7 +56,10 @@ class MemoryManager:
         # 3. 初始化 Knowledge Graph (Neo4j)
         self.graph = GraphManager()
         
-        # 4. 初始化实体提取链 (LLM)
+        # 4. 初始化动态锚点管理器 (Dynamic Personality Engine)
+        self.anchor_manager = DynamicAnchorManager(self.db_path)
+        
+        # 5. 初始化实体提取链 (LLM)
         self.extractor_chain = ENTITY_EXTRACTION_PROMPT | get_deepseek_chat() | StrOutputParser()
 
     def _init_sqlite(self):
@@ -237,6 +241,17 @@ class MemoryManager:
             cursor.execute('ALTER TABLE style_guide ADD COLUMN source_chapter INTEGER')
         except: pass
 
+        # Anchor & Epoch Migrations (P9)
+        try:
+            cursor.execute('ALTER TABLE character_anchors ADD COLUMN epoch_id INTEGER')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE character_anchors ADD COLUMN status TEXT DEFAULT "active"')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE character_anchors ADD COLUMN evolution_logic TEXT')
+        except: pass
+
         # 卷管理表
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS volumes (
@@ -311,11 +326,31 @@ class MemoryManager:
                 content TEXT,
                 tags TEXT, -- JSON list of triggers e.g. ["fight", "despair"]
                 is_active BOOLEAN DEFAULT 1,
+                
+                -- 🔥 P9新增: 动态演化字段
+                epoch_id INTEGER, -- 所属代际 ID
+                status TEXT DEFAULT 'active', -- 'active', 'archived', 'shattered', 'transcended'
+                evolution_logic TEXT, -- 演化/废弃原因
+                
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 🔥 P9新增: 角色代际表 (Character Epochs)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS character_epochs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT,
+                epoch_name TEXT, -- e.g. "青涩少年期"
+                description TEXT,
+                start_chapter INTEGER,
+                end_chapter INTEGER, -- NULL 表示当前正在进行
+                evolution_trigger TEXT, -- 触发进化的核心事件
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
-        # 混沌冷却池 (Chaos Cooldowns)
+        # Chaos Cooldowns
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chaos_cooldowns (
                 category TEXT PRIMARY KEY,
@@ -685,40 +720,35 @@ class MemoryManager:
     def add_anchor(self, character_name: str, category: str, content: str, tags: List[str] = None):
         """
         添加一个“黄金锚点”。这是角色绝对不能违背的设定/原文。
-        用于防止长篇连载中的人设漂移。
+        🔥 P9升级: 委托给 DynamicAnchorManager，自动关联当前代际。
         """
-        if tags is None: tags = []
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO character_anchors (character_name, category, content, tags) 
-            VALUES (?, ?, ?, ?)
-        ''', (character_name, category, content, json.dumps(tags)))
-        conn.commit()
-        conn.close()
-        print(f"⚓️ Anchor Set for {character_name}: [{category}]")
+        self.anchor_manager.add_anchor(character_name, category, content, tags)
 
     def get_character_anchors(self, character_name: str) -> str:
-        """获取角色的绝对锚点，格式化为 System Instruction"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT category, content, tags 
-            FROM character_anchors 
-            WHERE character_name = ? AND is_active = 1
-        ''', (character_name,))
-        rows = cursor.fetchall()
-        conn.close()
+        """
+        获取角色的绝对锚点，格式化为 System Instruction
+        🔥 P9升级: 委托给 DynamicAnchorManager，仅返回当前代际有效锚点。
+        """
+        return self.anchor_manager.get_effective_anchors_text(character_name)
 
-        if not rows: return ""
+    def evolve_character(self, character_name: str, new_epoch_name: str, 
+                        trigger_reason: str, chapter_num: int):
+        """
+        🔥 P9新增: 触发角色性格进化 (进入新代际)
+        """
+        self.anchor_manager.start_new_epoch(
+            character_name, 
+            new_epoch_name, 
+            description=f"Evolved due to: {trigger_reason}", 
+            trigger_event=trigger_reason, 
+            chapter_num=chapter_num
+        )
 
-        lines = [f"### ⚓️ {character_name} 的黄金锚点 (Immutable Anchors) - 必须严格遵守"]
-        for cat, content, tags_json in rows:
-            tags = json.loads(tags_json)
-            tag_str = f" [触发: {', '.join(tags)}]" if tags else ""
-            lines.append(f"- 【{cat}】{tag_str}: {content}")
-        
-        return "\n".join(lines)
+    def shatter_anchor(self, anchor_id: int, reason: str, chapter_num: int):
+        """
+        🔥 P9新增: 击碎旧锚点
+        """
+        self.anchor_manager.shatter_anchor(anchor_id, reason, chapter_num)
 
     # --- 文风样板 (Style Guide) ---
 

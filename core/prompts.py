@@ -384,6 +384,17 @@ JSON 结构规范：
     ],
     "new_foreshadowing": [...],
     "resolved_foreshadowing_ids": [1, 5], 
+    "character_evolutions": [ // 🔥 P9新增: 角色性格演化
+        {
+            "character_name": "...",
+            "new_epoch_name": "...", // e.g. "黑化期"
+            "trigger_reason": "...",
+            "shattered_anchors": ["..."], // 被打破的旧锚点内容
+            "new_anchors": [
+                {"category": "Motivation", "content": "..."}
+            ]
+        }
+    ],
     "world_updates": [],
     "current_date": "..."
 }}
@@ -692,6 +703,62 @@ ANCHOR_VIOLATION_CHECK_PROMPT = ChatPromptTemplate.from_messages(
 {content}
 
 请检测是否存在OOC违规。
+""",
+        ),
+    ]
+)
+
+# --- Causality Simulator (DeepSeek-R1) Prompts ---
+
+CAUSALITY_SIMULATION_SYSTEM_PROMPT = """你是一个【因果律计算引擎 (Causality Engine)】。
+你的任务是进行"蝴蝶效应"推演：基于当前动作，预测其对未来剧情的连锁影响。
+
+输入信息：
+1. **拟定动作 (Proposed Action)**: 编剧打算安排的情节（如：主角杀死了赵虎）。
+2. **影响子图 (Impact Subgraph)**: 目标人物的社会关系网（亲友、势力、仇敌）。
+3. **活跃伏笔 (Active Hooks)**: 尚未回收的重要伏笔。
+4. **未来规划 (Future Plan)**: 后续几章的剧情目标。
+
+请进行以下推演：
+1. **直接后果**: 谁会立即做出反应？（如：赵虎的父亲会复仇）
+2. **二阶效应**: 这会如何改变势力格局？（如：青云门与主角彻底决裂）
+3. **伏笔/规划冲突**: 这个动作是否导致某个伏笔无法回收？或者导致未来规划无法执行？（如：原本计划借赵虎之手进入禁地，现在路断了）
+
+输出 JSON (严禁 Markdown):
+{{
+    "risk_level": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+    "consequences": [
+        {{
+            "type": "Social" | "Plot" | "Logical",
+            "description": "...", 
+            "severity": "..." 
+        }}
+    ],
+    "broken_hooks": ["伏笔ID: 内容..."], // 导致无法回收的伏笔
+    "plan_disruption": "对未来规划的破坏描述（无则为 null）",
+    "verdict": "SAFE" | "WARNING" | "DANGEROUS" // 建议
+}}
+"""
+
+CAUSALITY_SIMULATION_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", CAUSALITY_SIMULATION_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+【拟定动作】：
+{action}
+
+【影响子图 (社会关系网)】：
+{impact_graph}
+
+【活跃伏笔 (可能被波及)】：
+{active_hooks}
+
+【未来规划 (Volume/Arc Goal)】：
+{future_plan}
+
+请计算蝴蝶效应。
 """,
         ),
     ]

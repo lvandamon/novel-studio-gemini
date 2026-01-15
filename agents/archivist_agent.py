@@ -291,6 +291,34 @@ class ArchivistAgent:
                 self.memory.upsert_character(name, updates, chapter_num)
                 print(f"   👤 角色更新: {name}")
 
+            # 🔥 P9新增: 处理性格演化事件 (Dynamic Evolution)
+            for evo in extraction.character_evolutions:
+                print(f"   🧬 [EVOLUTION] {evo.character_name} 触发性格质变: {evo.new_epoch_name}")
+                
+                # 1. 开启新代际
+                self.memory.evolve_character(
+                    character_name=evo.character_name,
+                    new_epoch_name=evo.new_epoch_name,
+                    trigger_reason=evo.trigger_reason,
+                    chapter_num=chapter_num
+                )
+                
+                # 2. 击碎旧锚点 (如果有)
+                # Archivist 提取的 shattered_anchors 是内容字符串，我们需要找到对应的 ID
+                # 这里简化处理：我们实际上需要一个按内容查找锚点的方法，或者让 Archivist 返回更模糊的匹配
+                # 目前暂且跳过自动击碎，由 Director 或 Human Reviewer 处理，
+                # 或者后续在 DynamicAnchorManager 中实现 fuzzy match logic。
+                # 但我们可以添加新锚点。
+                
+                # 3. 添加新锚点
+                for anchor in evo.new_anchors:
+                    self.memory.add_anchor(
+                        character_name=evo.character_name,
+                        category=anchor.get("category", "General"),
+                        content=anchor.get("content", ""),
+                        tags=["evolution"]
+                    )
+
             # 6. 处理伏笔
             for hook in extraction.new_foreshadowing:
                 self.memory.add_foreshadowing(chapter_num, f"[{hook.type}] {hook.content}")

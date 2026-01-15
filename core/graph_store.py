@@ -689,6 +689,63 @@ class GraphManager:
             if shortcuts_created > 0:
                 print(f"   🔗 P8: 自动创建了 {shortcuts_created} 个因果快捷链接")
 
+    @retry_neo4j()
+    def get_impact_subgraph(self, entity_name: str, depth: int = 2) -> str:
+        """
+        🔥 P10新增: 获取"冲击波子图" (Impact Subgraph)
+        用于因果模拟：当一个实体发生重大变故(如死亡/背叛)时，
+        找出所有可能受到波及的节点（亲属、盟友、仇敌、所属势力）。
+        """
+        if not self.is_connected():
+            return self._fallback_query_entity_context(entity_name, recent_window=1000)
+
+        query = f"""
+        MATCH (target {{name: $name}})
+        // 1. 获取直接关系
+        OPTIONAL MATCH (target)-[r1]-(n1)
+        WHERE (n1.status IS NULL OR n1.status = 'Active') 
+          AND (r1.end_chapter IS NULL) // 必须是当前活跃关系
+
+        // 2. 获取二阶重要关系 (仅限重要节点或特定强关系)
+        OPTIONAL MATCH (n1)-[r2]-(n2)
+        WHERE (n2.status IS NULL OR n2.status = 'Active')
+          AND (r2.end_chapter IS NULL)
+          AND (type(r2) IN ['KIN_OF', 'MASTER_OF', 'DISCIPLE_OF', 'LOVES', 'HATES', 'LEADER_OF', 'MEMBER_OF'])
+
+        RETURN 
+            target.name as center,
+            type(r1) as rel1, n1.name as neighbor, labels(n1) as type1, r1.desc as desc1,
+            type(r2) as rel2, n2.name as distant, labels(n2) as type2, r2.desc as desc2
+        LIMIT 50
+        """
+        
+        impact_lines = set()
+        
+        with self.driver.session() as session:
+            result = session.run(query, name=entity_name)
+            for record in result:
+                center = record['center']
+                neighbor = record['neighbor']
+                
+                if not neighbor: continue
+                
+                # Format: (Center) --[Rel]--> (Neighbor)
+                line1 = f"({center}) --[{record['rel1']}]--> ({neighbor})"
+                if record['desc1']: line1 += f" ({record['desc1']})"
+                impact_lines.add(line1)
+                
+                # Format: (Neighbor) --[Rel]--> (Distant)
+                distant = record['distant']
+                if distant and distant != center:
+                    line2 = f"   ↳ ({neighbor}) --[{record['rel2']}]--> ({distant})"
+                    if record['desc2']: line2 += f" ({record['desc2']})"
+                    impact_lines.add(line2)
+
+        if not impact_lines:
+            return f"系统未检测到 {entity_name} 有活跃的社会关系网。"
+            
+        return f"# 🕸️ {entity_name} 的社会影响网络 (Impact Subgraph)\n" + "\n".join(sorted(impact_lines))
+
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
         query = f"""
