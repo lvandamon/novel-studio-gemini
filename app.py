@@ -118,6 +118,7 @@ with col_main:
     # Configuration
     with st.expander("🛠️ 干扰参数 (Intervention)", expanded=False):
         user_guidance = st.text_area("给导演/主编的额外指令 (可选)", placeholder="例如：本章必须要死一个配角...")
+        flashback_injection = st.text_area("💉 记忆/闪回注入 (Flashback Injection)", placeholder="在此输入一段过去的记忆或强烈的情感片段，系统将强制在文中闪回...", height=100)
         force_director = st.checkbox("强制唤醒导演 (Force Director)", value=(next_chap % 5 == 0))
     
     # Action Button
@@ -131,7 +132,8 @@ with col_main:
             "narrative_plan": memory.get_active_plan(),
             "narrative_focus": memory.get_narrative_focus(),
             "revision_count": 0,
-            "director_ran": force_director # Hint
+            "director_ran": force_director, # Hint
+            "flashback_injection": flashback_injection if flashback_injection.strip() else None
         }
         
         # Run Graph
@@ -160,8 +162,16 @@ with col_main:
                 
                 sys.stdout = old_stdout
                 
-                st.session_state.current_content = result.get("final_content", "（无内容生成）")
-                st.success("✅ 生成完成！已自动归档。")
+                # Check for intervention
+                if result.get("intervention_reason"):
+                    st.error("🛑 流程中断：需要人工干预")
+                    st.warning(f"原因: {result.get('intervention_reason')}")
+                    st.info("请在下方【干扰参数】中调整指令，或在【数据修正】页签中修复逻辑冲突，然后重新运行。")
+                elif result.get("final_content"):
+                    st.session_state.current_content = result.get("final_content", "（无内容生成）")
+                    st.success("✅ 生成完成！已自动归档。")
+                else:
+                    st.warning("⚠️ 流程结束但未生成内容 (可能被手动中止)")
                 
             except Exception as e:
                 sys.stdout = old_stdout # restore
@@ -169,7 +179,7 @@ with col_main:
                 st.session_state.logs.append(f"ERROR: {e}")
             finally:
                 st.session_state.workflow_running = False
-                st.rerun()
+                # st.rerun() # Don't rerun immediately so user can see error
 
     # Content Display
     if st.session_state.current_content:
@@ -183,16 +193,16 @@ with col_log:
 
 # --- 5. Database View (Tabs below) ---
 st.divider()
-tab1, tab2 = st.tabs(["📚 历史章节", "🕸️ 知识图谱"])
+tab1, tab2, tab3 = st.tabs(["📚 历史章节", "🕸️ 知识图谱", "🛠️ 数据修正 (Retcon)"])
 
 with tab1:
     chap_num_view = st.number_input("查看章节", min_value=1, max_value=max(1, next_chap-1), step=1)
     if st.button("加载章节"):
         summary = memory.get_chapter_summary(chap_num_view)
         # Hack to get content from vector store (not ideal, but works for demo)
-        docs = memory.similarity_search(f"第{chap_num_view}章正文", k=1) 
+        # docs = memory.similarity_search(f"第{chap_num_view}章正文", k=1) 
         # Better: query SQL events
-        events = memory.get_relevant_events("", recent_k=10) # this is generic
+        # events = memory.get_relevant_events("", recent_k=10) # this is generic
         
         st.markdown(f"**摘要**: {summary}")
         # Content retrieval is hard without a direct 'chapters' table storing full text. 
@@ -212,3 +222,74 @@ with tab2:
             net.save_graph("graph.html")
             with open("graph.html", 'r', encoding='utf-8') as f:
                 components.html(f.read(), height=520)
+
+with tab3:
+    st.markdown("### 🧬 角色档案修正 (Character Retcon)")
+    st.info("直接修改数据库中的角色状态。请谨慎操作，修改后无法撤销。")
+    
+    # Load all characters
+    import sqlite3
+    import json
+    
+    conn = sqlite3.connect(memory.db_path)
+    df_chars = pd.read_sql("SELECT id, name, data FROM characters", conn)
+    conn.close()
+    
+    # Convert JSON data to columns for editing
+    # Simplified: just show name and raw JSON for advanced editing, 
+    # or extract key fields.
+    # For Retcon, raw JSON editing is powerful but dangerous.
+    # Let's try to extract some common fields.
+    
+    char_list = []
+    for _, row in df_chars.iterrows():
+        try:
+            d = json.loads(row['data'])
+            char_list.append({
+                "id": row['id'],
+                "name": row['name'],
+                "role": d.get("role", "NPC"),
+                "status": d.get("current_state", "Normal"),
+                "location": d.get("location", "Unknown"),
+                "level": d.get("level", "Unknown"),
+                "is_dead": d.get("is_dead", False)
+            })
+        except:
+            pass
+            
+    df_editor = pd.DataFrame(char_list)
+    
+    edited_df = st.data_editor(df_editor, num_rows="dynamic", key="char_editor")
+    
+    if st.button("💾 保存角色修正"):
+        # Detect changes and update DB
+        # This is a bit complex logic-wise for a demo, 
+        # basically we iterate edited_df, find changes, and update JSON in DB.
+        # For now, let's just support updating the fields shown.
+        
+        conn = sqlite3.connect(memory.db_path)
+        cursor = conn.cursor()
+        
+        updated_count = 0
+        for index, row in edited_df.iterrows():
+            cid = row['id']
+            # Fetch original
+            cursor.execute("SELECT data FROM characters WHERE id = ?", (cid,))
+            orig_row = cursor.fetchone()
+            if orig_row:
+                orig_data = json.loads(orig_row[0])
+                # Update fields
+                orig_data['role'] = row['role']
+                orig_data['current_state'] = row['status']
+                orig_data['location'] = row['location']
+                orig_data['level'] = row['level']
+                orig_data['is_dead'] = row['is_dead']
+                
+                new_json = json.dumps(orig_data, ensure_ascii=False)
+                cursor.execute("UPDATE characters SET data = ? WHERE id = ?", (new_json, cid))
+                updated_count += 1
+        
+        conn.commit()
+        conn.close()
+        st.success(f"已更新 {updated_count} 名角色的档案。")
+        st.rerun()

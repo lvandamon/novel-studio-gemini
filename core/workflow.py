@@ -37,6 +37,10 @@ class NovelState(TypedDict):
     requires_director_review: bool  # 🔥 P1新增: 标记需要Director特殊审查
     high_risk_flag: bool  # 🔥 P1新增: 标记高风险章节(Simulator多次驳回)
     archivist_rejected: bool # 🔥 P7新增: 档案员逻辑驳回标记
+    
+    # Intervention
+    intervention_reason: Optional[str] # 🔥 P10新增: 人工干预原因
+    flashback_injection: Optional[str] # 🔥 P10新增: 用户手动注入的闪回/记忆
 
 from agents.foreshadowing_agent import ForeshadowingAgent
 
@@ -127,6 +131,16 @@ class NovelWorkflow:
         # 获取这些角色的因果上下文 (包括从第一卷到现在的恩怨)
         causal_context = self.editor._get_causal_context(potential_chars)
 
+        # 🆕 核心修复：注入之前的驳回反馈，防止无效重试循环
+        rejection_context = ""
+        sim_feedback = state.get("simulator_feedback", "")
+        if sim_feedback and "PASS" not in sim_feedback:
+            rejection_context += f"\n\n🛑【逻辑沙盘驳回】(上一次规划失败的原因):\n{sim_feedback}\n"
+            
+        # 如果是因为档案员发现历史冲突回滚的
+        if state.get("archivist_rejected"):
+             rejection_context += f"\n\n🚨【历史一致性致命冲突】(档案员发现本剧情违背了历史设定):\n{state.get('review_feedback', '未知冲突')}\n"
+
         full_context = f"""
 {base_context}
 
@@ -135,6 +149,7 @@ class NovelWorkflow:
 
 ## 6. 伏笔回收建议 (Callbacks - Priority)
 {hook_suggestions}
+{rejection_context}
 """
 
         outline_data = self.editor.generate_outline(state["chapter_num"], full_context, causal_context=causal_context)
@@ -187,20 +202,22 @@ class NovelWorkflow:
             outline=outline_str,
             active_characters=active_chars,
             scene_location=scene_loc,
-            atmosphere=atmosphere
+            atmosphere=atmosphere,
+            flashback_injection=state.get("flashback_injection") # 🔥 P10: Inject User Flashback
         )
         
-        # Add review feedback if re-drafting
-        if state.get("review_feedback"):
-            # Try parsing JSON feedback
+        # Add review feedback if re-drafting (only if NOT passed)
+        review_raw = state.get("review_feedback", "")
+        if review_raw and "PASS" not in review_raw:
             try:
                 import json
-                fb_data = json.loads(state['review_feedback'])
-                suggestion = fb_data.get("suggestion", state['review_feedback'])
-                if suggestion:
+                fb_data = json.loads(review_raw)
+                # 只有当状态不是 APPROVED/PASS 时才注入
+                if fb_data.get("status") != "PASS":
+                    suggestion = fb_data.get("suggestion", review_raw)
                     context_package += f"\n\n🛑【导演/审核驳回指令】(必须修正):\n{suggestion}\n"
             except:
-                context_package += f"\n\n⚠️【必须修正的问题】(来自上一轮审核):\n{state['review_feedback']}\n"
+                context_package += f"\n\n⚠️【必须修正的问题】(来自上一轮审核):\n{review_raw}\n"
         
         draft = self.writer.write_chapter(outline_str, context_package, active_characters=active_chars)
         state["draft_content"] = draft
@@ -275,7 +292,7 @@ class NovelWorkflow:
             return "rejected"
         return "approved"
 
-    def check_simulator_status(self, state: NovelState) -> Literal["approve", "reject"]:
+    def check_simulator_status(self, state: NovelState) -> Literal["approve", "reject", "intervention"]:
         feedback = state.get("simulator_feedback", "")
         retries = state.get("simulator_retry_count", 0)
 
@@ -284,20 +301,12 @@ class NovelWorkflow:
 
         # 🔥 P1修复: 优化重试逻辑
         if retries >= 3:
-            print("   🚨 模拟器驳回次数过多(3次)，触发强制人工审查流程。")
+            print("   🚨 模拟器驳回次数过多(3次)，触发强制人工干预流程 (Human-in-the-Loop)。")
             print(f"   📋 驳回理由: {feedback}")
-
-            # 策略A: 记录严重逻辑冲突,Director下一轮强制介入
-            # 标记需要Director特殊关注
-            state["requires_director_review"] = True
-
-            # 策略B: 降低Simulator敏感度,再给一次机会 (可选,暂时注释)
-            # state["simulator_retry_count"] = 0  # 重置计数
-
-            # 现阶段实现: 强制通过但标记,让Reviewer重点审查
-            print("   ⚠️ 暂时放行,但标记为高风险。Reviewer将进行二次严审。")
-            state["high_risk_flag"] = True
-            return "approve"
+            
+            # 标记干预原因
+            state["intervention_reason"] = f"模拟器连续驳回3次，逻辑死锁。\n最后反馈: {feedback}"
+            return "intervention"
 
         print(f"   🔙 模拟器驳回(尝试 {retries}/3)，Editor 重写大纲...")
         return "reject"

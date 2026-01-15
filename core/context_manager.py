@@ -825,9 +825,10 @@ class ContextManager:
                 
             return intent
 
-    def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None) -> str:
+    def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None, flashback_injection: str = None) -> str:
         """
         重构后的 Writer 上下文构建：意图驱动型检索 + 智能压缩
+        🔥 P10: 支持 Flashback Injection (手动记忆注入)
         """
         # 0. 意图分析
         intent = self._analyze_plot_intent(outline)
@@ -1018,6 +1019,11 @@ class ContextManager:
              flashback_query = f"{outline} {intent['type']}"
              flashback_text = self.memory.retrieve_highlights(flashback_query, k=3)
 
+        # 🔥 P10新增: 手动注入的 Flashback (Highest Priority)
+        user_flashback = ""
+        if flashback_injection:
+            user_flashback = f"\n‼️【用户强制记忆注入 (Flashback Injection)】\n{flashback_injection}\n(请在行文中自然融入上述记忆片段或情感基调)\n"
+
         # 格式化氛围
         atmosphere_text = ""
         if atmosphere:
@@ -1029,4 +1035,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{physics_text}\n{ledger_text}\n{vocab_text}\n{state_text}\n{director_instruction}\n{atmosphere_text}\n{style_text}\n{flashback_text}\n{retrieval_optimized}"
+        return f"{bible_text}\n{physics_text}\n{ledger_text}\n{vocab_text}\n{state_text}\n{director_instruction}\n{atmosphere_text}\n{style_text}\n{flashback_text}\n{user_flashback}\n{retrieval_optimized}"
