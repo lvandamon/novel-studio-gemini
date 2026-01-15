@@ -35,13 +35,20 @@ class GraphManager:
         self.driver = None
         self.db_path = db_path  # 🔥 P3修复: SQL降级备份数据库路径
 
-        # 🔥 P4新增: 连接健康监控
+        # 🔥 P4新增 + P8升级: 连接健康监控
         self._last_health_check = 0
-        self._health_check_interval = 300  # 5分钟健康检查间隔
+        self._health_check_interval = 180  # 🔥 P8升级: 缩短至3分钟健康检查间隔
         self._consecutive_failures = 0
         self._max_consecutive_failures = 3
         self._reconnect_backoff = 1  # 重连退避时间(秒)
+        self._max_reconnect_backoff = 30  # 🔥 P8新增: 最大退避时间降至30秒
         self._is_degraded_mode = False  # 是否处于降级模式
+
+        # 🔥 P8新增: 降级模式统计和自动恢复
+        self._degraded_since = None  # 进入降级模式的时间
+        self._auto_recovery_interval = 600  # 10分钟自动尝试恢复
+        self._total_queries_in_degraded = 0  # 降级模式下的查询计数
+        self._last_auto_recovery_attempt = 0
 
         self._connect()
 
@@ -62,12 +69,15 @@ class GraphManager:
             self.driver.verify_connectivity()
             print("✅ Neo4j 连接成功")
 
-            # 🔥 P4新增: 连接成功,重置状态
+            # 🔥 P4新增 + P8升级: 连接成功,重置状态
             self._consecutive_failures = 0
             self._reconnect_backoff = 1
             if self._is_degraded_mode:
-                print("✅ Neo4j 已从降级模式恢复!")
+                degraded_duration = time.time() - self._degraded_since if self._degraded_since else 0
+                print(f"✅ Neo4j 已从降级模式恢复! (降级时长: {degraded_duration:.0f}秒, 期间查询: {self._total_queries_in_degraded}次)")
                 self._is_degraded_mode = False
+                self._degraded_since = None
+                self._total_queries_in_degraded = 0
             self._last_health_check = time.time()
 
         except Exception as e:
@@ -79,16 +89,24 @@ class GraphManager:
                     print("⚠️ 连续失败次数过多,进入降级模式(Degraded Mode)")
                     print("   系统将继续运行,但关系图谱功能不可用。依赖纯向量+SQL记忆。")
                     self._is_degraded_mode = True
+                    self._degraded_since = time.time()  # 🔥 P8新增: 记录进入降级模式的时间
             self.driver = None  # 明确标记为不可用
 
     def health_check(self) -> Dict[str, Any]:
         """
-        🔥 P4新增: 连接健康检查
+        🔥 P4新增 + P8升级: 连接健康检查
 
         Returns:
-            Dict with keys: 'connected', 'degraded_mode', 'failures', 'last_check'
+            Dict with keys: 'connected', 'degraded_mode', 'failures', 'last_check', 'degraded_duration'
         """
         current_time = time.time()
+
+        # 🔥 P8新增: 降级模式下的自动恢复尝试
+        if self._is_degraded_mode:
+            if current_time - self._last_auto_recovery_attempt >= self._auto_recovery_interval:
+                self._last_auto_recovery_attempt = current_time
+                print(f"   🔄 降级模式自动恢复尝试 (已降级 {current_time - self._degraded_since:.0f}秒)...")
+                self._connect()
 
         # 如果距离上次检查超过间隔,进行新的检查
         if current_time - self._last_health_check >= self._health_check_interval:
@@ -99,8 +117,11 @@ class GraphManager:
                     self.driver.verify_connectivity()
                     self._consecutive_failures = 0
                     if self._is_degraded_mode:
-                        print("✅ Neo4j 健康检查通过,退出降级模式!")
+                        degraded_duration = current_time - self._degraded_since if self._degraded_since else 0
+                        print(f"✅ Neo4j 健康检查通过,退出降级模式! (降级时长: {degraded_duration:.0f}秒)")
                         self._is_degraded_mode = False
+                        self._degraded_since = None
+                        self._total_queries_in_degraded = 0
                 except Exception as e:
                     print(f"⚠️ Neo4j 健康检查失败: {e}")
                     self._consecutive_failures += 1
@@ -109,14 +130,21 @@ class GraphManager:
                 if not self._is_degraded_mode or self._consecutive_failures < 10:
                     print(f"   🔄 尝试重新连接 Neo4j (退避 {self._reconnect_backoff}秒)...")
                     time.sleep(self._reconnect_backoff)
-                    self._reconnect_backoff = min(self._reconnect_backoff * 2, 60)  # 最大60秒
+                    self._reconnect_backoff = min(self._reconnect_backoff * 2, self._max_reconnect_backoff)
                     self._connect()
+
+        # 🔥 P8新增: 返回更详细的状态信息
+        degraded_duration = None
+        if self._is_degraded_mode and self._degraded_since:
+            degraded_duration = current_time - self._degraded_since
 
         return {
             "connected": self.driver is not None and not self._is_degraded_mode,
             "degraded_mode": self._is_degraded_mode,
             "consecutive_failures": self._consecutive_failures,
-            "last_check": self._last_health_check
+            "last_check": self._last_health_check,
+            "degraded_duration": degraded_duration,
+            "queries_in_degraded": self._total_queries_in_degraded
         }
 
     def try_reconnect(self) -> bool:
@@ -154,10 +182,12 @@ class GraphManager:
 
     def _fallback_query_entity_context(self, entity_name: str, current_chapter: int = 999999, recent_window: int = 500) -> str:
         """
-        🔥 P3修复: SQL降级版实体上下文查询
+        🔥 P3修复 + P8升级: SQL降级版实体上下文查询
 
         当Neo4j不可用时，从relationship_backup表查询关系
+        P8新增: 降级查询统计
         """
+        self._total_queries_in_degraded += 1  # 🔥 P8新增: 统计降级查询次数
         try:
             conn = self._get_sql_connection()
             cursor = conn.cursor()
@@ -529,7 +559,7 @@ class GraphManager:
         """
         if not self.is_connected():
             return
-            
+
         query = """
         MATCH (e:Event {uid: $uid})
         SET e.status = 'Archived', e.archived_at = timestamp()
@@ -537,6 +567,127 @@ class GraphManager:
         with self.driver.session() as session:
             session.run(query, uid=str(event_uid))
         print(f"   🗂️ Event Archived: {event_uid}")
+
+    @retry_neo4j()
+    def create_causal_shortcut(self, root_event_uid: str, distant_cause_uid: str, shortcut_reason: str = ""):
+        """
+        🔥 P8新增: 创建因果链快捷链接
+
+        用于解决因果链深度限制问题。当两个事件在因果链上相距很远时，
+        可以创建一个直接的快捷链接，使得查询时能快速定位到远因。
+
+        Args:
+            root_event_uid: 近期事件的UID
+            distant_cause_uid: 远因事件的UID
+            shortcut_reason: 创建快捷链接的原因
+        """
+        if not self.is_connected():
+            return
+
+        query = """
+        MATCH (root:Event {uid: $root_uid})
+        MATCH (distant:Event {uid: $distant_uid})
+        MERGE (distant)-[r:CAUSED_SHORTCUT]->(root)
+        SET r.reason = $reason,
+            r.created_at = timestamp(),
+            r.is_shortcut = true
+        """
+        with self.driver.session() as session:
+            session.run(query, root_uid=str(root_event_uid), distant_uid=str(distant_cause_uid), reason=shortcut_reason)
+        print(f"   🔗 Causal Shortcut Created: {distant_cause_uid} --[SHORTCUT]--> {root_event_uid}")
+
+    @retry_neo4j()
+    def query_deep_causal_chain(self, event_uid: str, max_depth: int = 15) -> str:
+        """
+        🔥 P8新增: 深度因果链查询（包含快捷链接）
+
+        支持更深的因果追溯，同时利用快捷链接跳过中间节点
+        """
+        if not self.is_connected():
+            return self._fallback_query_causal_chain(event_uid, min(max_depth, 5))
+
+        # 查询包含快捷链接的因果链
+        query = f"""
+        // 先查询快捷链接（直达远因）
+        OPTIONAL MATCH shortcut_path = (root:Event {{uid: $uid}})<-[:CAUSED_SHORTCUT]-(shortcut_cause:Event)
+        WITH root, collect(DISTINCT shortcut_cause) as shortcut_causes
+
+        // 再查询常规因果链
+        MATCH normal_path = (root)<-[:CAUSED*1..{max_depth}]-(cause:Event)
+        WHERE (cause.status IS NULL OR cause.status = 'Active')
+
+        WITH shortcut_causes, collect(DISTINCT cause) as normal_causes
+
+        // 合并结果
+        UNWIND (shortcut_causes + normal_causes) as all_cause
+        OPTIONAL MATCH (c:Character)-[:PARTICIPATED_IN]->(all_cause)
+
+        RETURN DISTINCT all_cause.uid as uid,
+               all_cause.chapter as chap,
+               all_cause.description as desc,
+               all_cause.type as type,
+               CASE WHEN all_cause IN shortcut_causes THEN '⚡️' ELSE '' END as is_shortcut,
+               collect(DISTINCT c.name) as participants
+        ORDER BY all_cause.chapter DESC
+        LIMIT 30
+        """
+
+        chain = []
+        with self.driver.session() as session:
+            result = session.run(query, uid=str(event_uid))
+            for record in result:
+                participants = [p for p in record['participants'] if p]
+                participants_str = f" [{', '.join(participants[:3])}]" if participants else ""
+                event_type = record['type'] or 'Event'
+                shortcut_marker = record['is_shortcut']
+                chain.append(f"   {shortcut_marker}⬆️ [Ch{record['chap']}] ({event_type}){participants_str} {record['desc']}")
+
+        if not chain:
+            return "无明确因果记录。"
+
+        return "📜 深度因果链 (含快捷链接):\n" + "\n".join(chain)
+
+    @retry_neo4j()
+    def auto_create_shortcuts_for_core_events(self, current_chapter: int):
+        """
+        🔥 P8新增: 自动为Core事件创建快捷链接
+
+        当Core事件的因果链超过5层时，自动创建快捷链接到根因
+        """
+        if not self.is_connected():
+            return
+
+        # 查找需要创建快捷链接的Core事件
+        query = """
+        MATCH (core:Event {type: 'Core'})
+        WHERE core.chapter <= $chapter_threshold
+
+        // 查找深层因果
+        MATCH path = (core)<-[:CAUSED*5..10]-(root_cause:Event)
+        WHERE NOT EXISTS((root_cause)<-[:CAUSED]-())  // root_cause是根因
+
+        // 检查是否已有快捷链接
+        WHERE NOT EXISTS((root_cause)-[:CAUSED_SHORTCUT]->(core))
+
+        RETURN core.uid as core_uid, root_cause.uid as root_uid, length(path) as depth
+        LIMIT 10
+        """
+
+        chapter_threshold = current_chapter - 100  # 只处理100章前的事件
+
+        with self.driver.session() as session:
+            result = session.run(query, chapter_threshold=chapter_threshold)
+            shortcuts_created = 0
+            for record in result:
+                self.create_causal_shortcut(
+                    record['core_uid'],
+                    record['root_uid'],
+                    f"P8自动创建: 跨越{record['depth']}层因果"
+                )
+                shortcuts_created += 1
+
+            if shortcuts_created > 0:
+                print(f"   🔗 P8: 自动创建了 {shortcuts_created} 个因果快捷链接")
 
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""

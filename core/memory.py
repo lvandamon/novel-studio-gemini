@@ -2075,6 +2075,164 @@ class MemoryManager:
         conn.close()
         return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3]} for r in rows]
 
+    def auto_escalate_stale_foreshadowing(self, current_chapter: int) -> List[Dict[str, Any]]:
+        """
+        🔥 P8新增: 自动升级超期伏笔
+
+        规则:
+        - Core伏笔(importance >= 8): 超过150章未回收 -> 自动进入待审核队列
+        - 中等伏笔(importance 5-7): 超过250章未回收 -> 自动进入待审核队列
+        - 低优伏笔(importance < 5): 超过400章未回收 -> 标记为stale但不强制审核
+
+        Returns:
+            List of escalated foreshadowing items
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 定义超期阈值
+        thresholds = {
+            "core": (8, 10, 150),      # importance 8-10: 150章超期
+            "medium": (5, 7, 250),      # importance 5-7: 250章超期
+            "low": (1, 4, 400),         # importance 1-4: 400章超期
+        }
+
+        escalated = []
+
+        # 1. 处理Core伏笔超期
+        core_threshold = current_chapter - thresholds["core"][2]
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance
+            FROM foreshadowing
+            WHERE status = "active"
+              AND pending_resolution = 0
+              AND importance >= ?
+              AND importance <= ?
+              AND chapter_created <= ?
+        ''', (thresholds["core"][0], thresholds["core"][1], core_threshold))
+
+        core_stale = cursor.fetchall()
+        for row in core_stale:
+            clue_id, chapter_created, content, importance = row
+            # 自动升级为待审核
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET pending_resolution = 1,
+                    resolution_chapter_proposed = ?,
+                    resolution_confidence = 0.5,
+                    notes = COALESCE(notes, '') || ' | [P8自动升级] 超期' || ? || '章未回收'
+                WHERE id = ?
+            ''', (current_chapter, current_chapter - chapter_created, clue_id))
+            escalated.append({
+                "id": clue_id,
+                "chapter_created": chapter_created,
+                "content": content[:50] + "...",
+                "importance": importance,
+                "reason": "Core伏笔超期自动升级"
+            })
+
+        # 2. 处理Medium伏笔超期
+        medium_threshold = current_chapter - thresholds["medium"][2]
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance
+            FROM foreshadowing
+            WHERE status = "active"
+              AND pending_resolution = 0
+              AND importance >= ?
+              AND importance <= ?
+              AND chapter_created <= ?
+        ''', (thresholds["medium"][0], thresholds["medium"][1], medium_threshold))
+
+        medium_stale = cursor.fetchall()
+        for row in medium_stale:
+            clue_id, chapter_created, content, importance = row
+            cursor.execute('''
+                UPDATE foreshadowing
+                SET pending_resolution = 1,
+                    resolution_chapter_proposed = ?,
+                    resolution_confidence = 0.3,
+                    notes = COALESCE(notes, '') || ' | [P8自动升级] 中等伏笔超期' || ? || '章'
+                WHERE id = ?
+            ''', (current_chapter, current_chapter - chapter_created, clue_id))
+            escalated.append({
+                "id": clue_id,
+                "chapter_created": chapter_created,
+                "content": content[:50] + "...",
+                "importance": importance,
+                "reason": "中等伏笔超期自动升级"
+            })
+
+        # 3. 标记低优伏笔为stale（不强制审核，但会在报告中提示）
+        low_threshold = current_chapter - thresholds["low"][2]
+        cursor.execute('''
+            UPDATE foreshadowing
+            SET notes = COALESCE(notes, '') || ' | [P8] 标记为陈旧伏笔'
+            WHERE status = "active"
+              AND pending_resolution = 0
+              AND importance >= ?
+              AND importance <= ?
+              AND chapter_created <= ?
+              AND notes NOT LIKE '%标记为陈旧%'
+        ''', (thresholds["low"][0], thresholds["low"][1], low_threshold))
+
+        conn.commit()
+        conn.close()
+
+        if escalated:
+            print(f"   🔔 P8伏笔超期自动升级: {len(escalated)} 个伏笔已进入待审核队列")
+            for item in escalated:
+                print(f"      - ID:{item['id']} (importance:{item['importance']}) {item['content']}")
+
+        return escalated
+
+    def get_foreshadowing_health_report(self, current_chapter: int) -> Dict[str, Any]:
+        """
+        🔥 P8新增: 获取伏笔健康度报告
+
+        Returns:
+            Dict with foreshadowing statistics and health metrics
+        """
+        conn = sqlite3.connect(self.db_path, timeout=self._connection_timeout)
+        cursor = conn.cursor()
+
+        # 统计各状态伏笔数量
+        cursor.execute('''
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+                SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+                SUM(CASE WHEN pending_resolution = 1 THEN 1 ELSE 0 END) as pending_review,
+                SUM(CASE WHEN importance >= 8 AND status = 'active' THEN 1 ELSE 0 END) as active_core,
+                AVG(CASE WHEN status = 'resolved' THEN chapter_resolved - chapter_created ELSE NULL END) as avg_resolution_time
+            FROM foreshadowing
+        ''')
+        stats = cursor.fetchone()
+
+        # 计算超期伏笔
+        cursor.execute('''
+            SELECT COUNT(*) FROM foreshadowing
+            WHERE status = 'active'
+              AND pending_resolution = 0
+              AND (
+                  (importance >= 8 AND ? - chapter_created > 150)
+                  OR (importance >= 5 AND importance < 8 AND ? - chapter_created > 250)
+              )
+        ''', (current_chapter, current_chapter))
+        overdue_count = cursor.fetchone()[0]
+
+        conn.close()
+
+        return {
+            "total": stats[0] or 0,
+            "active": stats[1] or 0,
+            "resolved": stats[2] or 0,
+            "pending_review": stats[3] or 0,
+            "active_core": stats[4] or 0,
+            "avg_resolution_chapters": round(stats[5], 1) if stats[5] else None,
+            "overdue_count": overdue_count,
+            "health_score": max(0, 100 - overdue_count * 10 - (stats[3] or 0) * 5)  # 健康度评分
+        }
+
     # --- 高光时刻管理 (Emotional Highlights) ---
 
     def save_highlight(self, chapter_num: int, content: str, tags: List[str] = None, sentiment: str = "Neutral"):
@@ -2274,17 +2432,24 @@ class MemoryManager:
 
     def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False) -> str:
         """
-        🔥 P0优化版 + P6修复: 分区混合检索 (Partitioned Hybrid Retrieval)
+        🔥 P0优化版 + P6修复 + P8升级: 分区混合检索 (Partitioned Hybrid Retrieval)
 
         修复说明:
         - 移除了旧的 500 章硬窗口限制，解决了长程记忆断裂问题。
         - 采用 "近期热区(Recent)" + "全局高优(Global)" 双轨检索策略。
         - 确保早期的伏笔和核心设定(即使在1000章以前)也能被召回。
+
+        P8升级:
+        - 动态检索窗口: 根据总章节数自适应调整近期窗口
+        - 时间衰减权重: 越早的内容权重越低，但不会完全消失
+        - 重要性提权: Core伏笔和Bible内容获得更高权重
         """
         final_docs = {} # id/content_key -> Document
 
-        # --- 配置参数 ---
-        recent_window_size = 200  # 近期热区窗口 (章)
+        # --- P8升级: 动态检索窗口配置 ---
+        total_chapters = self._get_total_chapters()
+        # 动态窗口: 至少200章，最多回顾总章节的15%
+        recent_window_size = max(200, min(500, total_chapters // 7))
         recent_k = k              # 近期检索数量
         global_k = max(5, k)      # 全局检索数量 (保持较高召回)
 
@@ -2344,20 +2509,37 @@ class MemoryManager:
             for doc, score in raw_global:
                 # 过滤: 如果已经在 Recent 中找到，跳过 (由 _add_to_final 处理)
                 # 加权: 如果是 Bible 或 High Importance，分数加成
-                
+
                 doc_type = doc.metadata.get("type", "unknown")
                 importance = doc.metadata.get("importance", 5)
-                
+                doc_chapter = doc.metadata.get("chapter")
+
+                # 🔥 P8升级: 时间衰减权重计算
+                time_decay = 1.0
+                if current_chapter is not None and doc_chapter is not None:
+                    doc_chap_int = self._try_parse_int(doc_chapter)
+                    if doc_chap_int > 0 and total_chapters > 0:
+                        # 计算章节年龄比例
+                        age_ratio = (current_chapter - doc_chap_int) / max(current_chapter, 1)
+                        # 指数衰减: 最低保留 0.3 的权重，确保早期内容不会完全消失
+                        import math
+                        time_decay = max(0.3, math.exp(-age_ratio * 2))
+
                 boost = 1.0
                 if doc_type in ["bible_truth", "world_setting", "character_core"]:
-                    boost = 1.2  # 圣经/设定加权
+                    boost = 1.3  # 🔥 P8升级: 圣经/设定加权提升到1.3
+                    time_decay = 1.0  # Bible内容不衰减
                 elif importance >= 8:
-                    boost = 1.15 # 核心伏笔加权
+                    boost = 1.25 # 🔥 P8升级: 核心伏笔加权提升到1.25
+                    time_decay = max(0.5, time_decay)  # 核心伏笔衰减下限0.5
+                elif importance >= 5:
+                    boost = 1.1  # 🔥 P8新增: 中等重要性加权
 
-                final_score = score * boost
-                
+                final_score = score * boost * time_decay
+
                 doc.metadata["retrieval_source"] = "Global"
                 doc.metadata["raw_score"] = score
+                doc.metadata["time_decay"] = time_decay
                 self._add_to_final(final_docs, doc, final_score)
 
         except Exception as e:
@@ -2427,6 +2609,21 @@ class MemoryManager:
             return int(value)
         except:
             return -1
+
+    def _get_total_chapters(self) -> int:
+        """
+        🔥 P8新增: 获取当前总章节数
+        用于动态计算检索窗口和时间衰减
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=self._connection_timeout)
+            cursor = conn.cursor()
+            cursor.execute('SELECT MAX(chapter_num) FROM chapters')
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row and row[0] else 0
+        except Exception:
+            return 0
 
     def similarity_search(self, query: str, k: int = 3) -> List[Document]:
         return self.vector_store.similarity_search(query, k=k)

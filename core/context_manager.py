@@ -288,12 +288,13 @@ class ContextManager:
         remaining_overflow = remaining_usage / compressible_budget
 
         try:
+            # 🔥 P8升级: 使用安全压缩包装器进行质量校验
             if remaining_overflow <= 1.5:
-                compressed = self._single_compress(remaining_content, compressible_budget)
+                compressed = self._safe_compress(remaining_content, compressible_budget, self._single_compress)
             elif remaining_overflow <= 3.0:
-                compressed = self._chunked_compress(remaining_content, compressible_budget)
+                compressed = self._safe_compress(remaining_content, compressible_budget, self._chunked_compress)
             else:
-                compressed = self._aggressive_compress(remaining_content, compressible_budget)
+                compressed = self._safe_compress(remaining_content, compressible_budget, self._aggressive_compress)
 
             # 🔥 P3新增: 重新组装(关键信息在前)
             if critical_content.strip():
@@ -406,6 +407,90 @@ class ContextManager:
         # 最终兜底
         print("   ⚠️ Max rounds reached. Applying physical trim.")
         return self._trim_lines_to_budget(current_content, budget)
+
+    def _verify_compression_quality(self, original: str, compressed: str) -> Dict[str, Any]:
+        """
+        🔥 P8新增: 压缩质量校验
+
+        检查压缩后是否丢失关键实体和信息
+        Returns:
+            Dict with 'passed', 'missing_entities', 'quality_score'
+        """
+        # 1. 提取原文中的关键实体（人名、地名、物品名）
+        # 使用简单的中文实体提取模式
+        import re
+
+        # 人名模式（2-4个汉字，常见姓氏开头）
+        name_pattern = r'(?:[\u4e00-\u9fa5]{2,4})(?:道|说|叹|喊|笑|怒|惊|问|答)'
+        original_names = set(re.findall(r'([\u4e00-\u9fa5]{2,4})(?:道|说|叹|喊|笑|怒|惊|问|答)', original))
+        compressed_names = set(re.findall(r'([\u4e00-\u9fa5]{2,4})(?:道|说|叹|喊|笑|怒|惊|问|答)', compressed))
+
+        # 2. 提取关键词（黄金锚点、伏笔等标记）
+        critical_patterns = [
+            r'黄金锚点',
+            r'核心伏笔',
+            r'绝对不可',
+            r'必须遵守',
+            r'断肢|缺失|残废',
+            r'SEVERED|CRIPPLED',
+            r'⚓️|⚙️|‼️|🚨',
+        ]
+
+        missing_critical = []
+        for pattern in critical_patterns:
+            if re.search(pattern, original) and not re.search(pattern, compressed):
+                missing_critical.append(pattern)
+
+        # 3. 计算质量评分
+        name_retention = len(compressed_names & original_names) / max(len(original_names), 1)
+        critical_retention = 1 - len(missing_critical) / max(len(critical_patterns), 1)
+
+        quality_score = (name_retention * 0.4 + critical_retention * 0.6) * 100
+
+        # 4. 判断是否通过
+        passed = quality_score >= 60 and len(missing_critical) == 0
+
+        missing_names = original_names - compressed_names
+
+        if not passed:
+            print(f"   ⚠️ 压缩质量警告: 评分={quality_score:.1f}, 丢失人名={missing_names}, 丢失关键标记={missing_critical}")
+
+        return {
+            "passed": passed,
+            "quality_score": round(quality_score, 1),
+            "missing_names": list(missing_names)[:5],  # 最多显示5个
+            "missing_critical": missing_critical,
+            "name_retention_rate": round(name_retention * 100, 1),
+            "critical_retention_rate": round(critical_retention * 100, 1)
+        }
+
+    def _safe_compress(self, content: str, budget: int, compress_func) -> str:
+        """
+        🔥 P8新增: 安全压缩包装器
+
+        在压缩后进行质量校验，如果质量不达标则尝试补救
+        """
+        compressed = compress_func(content, budget)
+
+        # 质量校验
+        quality = self._verify_compression_quality(content, compressed)
+
+        if not quality["passed"]:
+            # 尝试补救：将丢失的关键内容追加回去
+            rescue_content = []
+
+            # 补救丢失的关键标记内容
+            for pattern in quality["missing_critical"]:
+                import re
+                matches = re.findall(f'.{{0,50}}{pattern}.{{0,50}}', content)
+                rescue_content.extend(matches[:2])  # 每个模式最多补救2条
+
+            if rescue_content:
+                rescue_text = "\n【关键信息补救】\n" + "\n".join(set(rescue_content))
+                compressed = compressed + rescue_text
+                print(f"   🩹 压缩质量补救: 已追加 {len(rescue_content)} 条关键信息")
+
+        return compressed
 
     def _get_cached_or_build(self, cache_key: str, build_func, invalidate_check) -> str:
         """
