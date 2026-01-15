@@ -1999,6 +1999,72 @@ class MemoryManager:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
+        
+        # 1. Check importance
+        cursor.execute("SELECT importance FROM foreshadowing WHERE id = ?", (clue_id,))
+        row = cursor.fetchone()
+        importance = row[0] if row else 5
+        
+        if importance >= 8:
+            # High importance -> Queue for human review
+            cursor.execute('''
+                UPDATE foreshadowing 
+                SET pending_resolution = 1,
+                    resolution_chapter_proposed = ?,
+                    resolution_confidence = ?,
+                    human_reviewed = 0
+                WHERE id = ?
+            ''', (chapter_resolved, confidence, clue_id))
+            print(f"   ⚠️ High Importance Clue [{clue_id}] queued for review.")
+        else:
+            # Normal -> Auto resolve
+            cursor.execute('''
+                UPDATE foreshadowing 
+                SET status = 'resolved', 
+                    chapter_resolved = ? 
+                WHERE id = ?
+            ''', (chapter_resolved, clue_id))
+            print(f"   ✅ Clue [{clue_id}] resolved automatically.")
+            
+        conn.commit()
+        conn.close()
+
+    def get_stale_unresolved_hooks(self, limit: int = 3) -> List[Dict]:
+        """
+        🔥 P6新增: 获取陈旧但未解决的伏笔 (The 'Chekhov's Gun' Registry)
+        这些伏笔埋下很久了，必须强制在上下文中提醒 Writer，防止烂尾。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 获取 active 状态，按创建章节升序排列 (最古老的优先)
+        # 同时排除掉 pending_resolution (正在等待审核的)
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance, tags 
+            FROM foreshadowing 
+            WHERE status = 'active' AND (pending_resolution IS NULL OR pending_resolution = 0)
+            ORDER BY chapter_created ASC
+            LIMIT ?
+        ''', (limit,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        hooks = []
+        for r in rows:
+            hooks.append({
+                "id": r[0],
+                "chapter_created": r[1],
+                "content": r[2],
+                "importance": r[3],
+                "tags": json.loads(r[4]) if r[4] else []
+            })
+        return hooks
+
+    def get_visual_graph_data(self, limit: int = 100) -> Dict[str, List[Dict]]:
+        """Wrapper for GraphManager visualization data"""
+        return self.graph.get_visualization_data(limit=limit)
+        cursor = conn.cursor()
 
         # 检查伏笔的importance
         cursor.execute('SELECT importance, content FROM foreshadowing WHERE id = ?', (clue_id,))

@@ -20,16 +20,27 @@ class DirectorAgent:
 
     def _fetch_structural_context(self, current_chapter: int) -> str:
         """结构化审计上下文 (Mid-Range View)"""
-        # 1. Active Hooks
+        # 1. Active Hooks (Including Stale)
         hooks = self.memory.get_active_foreshadowing()
-        hooks_text = "无活跃伏笔"
-        if hooks:
-            sorted_hooks = sorted(hooks, key=lambda x: -x['importance'])
-            lines = []
-            for h in sorted_hooks:
-                imp_mark = "🔥" if h['importance'] >= 8 else "🔸"
-                lines.append(f"- {imp_mark} [ID:{h['id']}] (Ch{h['chapter']}) {h['content']}")
-            hooks_text = "\n".join(lines)
+        stale_hooks = self.memory.get_stale_unresolved_hooks(limit=3)
+        
+        lines = []
+        
+        # Stale First
+        if stale_hooks:
+            lines.append("💀 [STALE/URGENT] 以下伏笔已滞后太久，需尽快推进：")
+            for h in stale_hooks:
+                lines.append(f"   - [ID:{h['id']}] (Since Ch{h['chapter_created']}) {h['content']}")
+        
+        # Regular High Importance
+        sorted_hooks = sorted(hooks, key=lambda x: -x['importance'])
+        for h in sorted_hooks:
+            if any(sh['id'] == h['id'] for sh in stale_hooks): continue # Skip if already shown as stale
+            
+            imp_mark = "🔥" if h['importance'] >= 8 else "🔸"
+            lines.append(f"- {imp_mark} [ID:{h['id']}] (Ch{h['chapter']}) {h['content']}")
+            
+        hooks_text = "\n".join(lines) if lines else "无活跃伏笔"
             
         # 2. Open Conflicts
         conflict_text = self.memory.graph.get_unresolved_conflicts(limit=10)

@@ -746,6 +746,38 @@ class GraphManager:
             
         return f"# 🕸️ {entity_name} 的社会影响网络 (Impact Subgraph)\n" + "\n".join(sorted(impact_lines))
 
+    @retry_neo4j()
+    def get_downstream_dependencies(self, entity_name: str, depth: int = 2) -> List[str]:
+        """
+        🔥 P11新增: 获取下游依赖实体 (Causality Taint Analysis)
+        用于 Retcon 时识别哪些角色/实体受到了目标实体的影响。
+        
+        Args:
+            entity_name: 发生变动的实体名
+            depth: 追溯深度
+            
+        Returns:
+            List of tainted entity names
+        """
+        if not self.is_connected():
+            return []
+            
+        query = f"""
+        MATCH (source {{name: $name}})
+        MATCH (source)-[*1..{depth}]->(target)
+        WHERE (target:Character OR target:Organization)
+        RETURN DISTINCT target.name as name
+        LIMIT 50
+        """
+        
+        tainted = []
+        with self.driver.session() as session:
+            result = session.run(query, name=entity_name)
+            for record in result:
+                tainted.append(record["name"])
+        
+        return tainted
+
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
         query = f"""

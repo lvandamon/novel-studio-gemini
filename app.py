@@ -193,37 +193,86 @@ with col_log:
 
 # --- 5. Database View (Tabs below) ---
 st.divider()
-tab1, tab2, tab3 = st.tabs(["📚 历史章节", "🕸️ 知识图谱", "🛠️ 数据修正 (Retcon)"])
+tab1, tab2, tab3, tab4 = st.tabs(["📚 历史章节", "🕸️ 知识图谱", "🕵️ 伏笔看板", "🛠️ 数据修正 (Retcon)"])
 
 with tab1:
     chap_num_view = st.number_input("查看章节", min_value=1, max_value=max(1, next_chap-1), step=1)
     if st.button("加载章节"):
         summary = memory.get_chapter_summary(chap_num_view)
-        # Hack to get content from vector store (not ideal, but works for demo)
-        # docs = memory.similarity_search(f"第{chap_num_view}章正文", k=1) 
-        # Better: query SQL events
-        # events = memory.get_relevant_events("", recent_k=10) # this is generic
-        
         st.markdown(f"**摘要**: {summary}")
-        # Content retrieval is hard without a direct 'chapters' table storing full text. 
-        # Ideally we should add 'content' column to 'chapters' table in sqlite.
 
 with tab2:
-    if st.button("渲染图谱"):
-        graph_data = memory.get_visual_graph_data()
-        if graph_data["nodes"]:
-            net = Network(height="500px", width="100%", bgcolor="#ffffff", font_color="black")
-            for n in graph_data["nodes"]:
-                net.add_node(n["id"], label=n["label"], color=n["color"], group=n["group"])
-            for e in graph_data["edges"]:
-                net.add_edge(e["from"], e["to"], label=e["label"])
-            
-            # Save and read
-            net.save_graph("graph.html")
-            with open("graph.html", 'r', encoding='utf-8') as f:
-                components.html(f.read(), height=520)
+    st.markdown("### 🌌 实体关系网")
+    if st.button("渲染图谱 (Neo4j)"):
+        with st.spinner("Fetching Graph Data..."):
+            try:
+                graph_data = memory.get_visual_graph_data(limit=150)
+                if graph_data["nodes"]:
+                    # Create PyVis Network
+                    net = Network(height="600px", width="100%", bgcolor="#1e1e1e", font_color="white", select_menu=True, filter_menu=True)
+                    
+                    # Add nodes
+                    for n in graph_data["nodes"]:
+                        net.add_node(n["id"], label=n["label"], title=n["label"], color=n["color"], group=n["group"])
+                    
+                    # Add edges
+                    for e in graph_data["edges"]:
+                        net.add_edge(e["from"], e["to"], label=e["label"], title=e["label"], arrows=e["arrows"])
+                    
+                    # Physics options
+                    net.set_options("""
+                    var options = {
+                      "physics": {
+                        "barnesHut": {
+                          "gravitationalConstant": -3000,
+                          "springLength": 200
+                        }
+                      }
+                    }
+                    """)
+                    
+                    # Save and display
+                    # Use a unique name to prevent caching issues
+                    path = os.path.join(os.getcwd(), "pages", "graph.html")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    net.save_graph(path)
+                    
+                    with open(path, 'r', encoding='utf-8') as f:
+                        source_code = f.read()
+                    components.html(source_code, height=620)
+                else:
+                    st.warning("暂无图谱数据。")
+            except Exception as e:
+                st.error(f"图谱渲染失败: {e}")
 
 with tab3:
+    st.markdown("### 🧩 伏笔管理 (Chekhov's Gun)")
+    
+    # 1. Stale Hooks
+    st.markdown("#### ⚠️ 陈旧伏笔 (Stale Hooks)")
+    stale_hooks = memory.get_stale_unresolved_hooks(limit=10)
+    if stale_hooks:
+        for h in stale_hooks:
+            with st.expander(f"[Ch{h['chapter_created']}] {h['content'][:50]}...", expanded=True):
+                st.write(f"**内容**: {h['content']}")
+                st.write(f"**重要性**: {h['importance']}")
+                if st.button(f"强制回收 (Resolve #{h['id']})", key=f"res_{h['id']}"):
+                    memory.resolve_foreshadowing(h['id'], next_chap, confidence=1.0)
+                    st.success("已标记为已回收！")
+                    st.rerun()
+    else:
+        st.info("暂无严重滞后的伏笔。")
+        
+    st.divider()
+    
+    # 2. All Active Hooks
+    with st.expander("查看所有活跃伏笔"):
+        all_hooks = memory.get_active_foreshadowing()
+        df_hooks = pd.DataFrame(all_hooks)
+        if not df_hooks.empty:
+            st.dataframe(df_hooks[['chapter_created', 'content', 'importance', 'status']])
+
+with tab4:
     st.markdown("### 🧬 角色档案修正 (Character Retcon)")
     st.info("直接修改数据库中的角色状态。请谨慎操作，修改后无法撤销。")
     

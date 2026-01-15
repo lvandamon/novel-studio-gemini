@@ -145,6 +145,22 @@ class RetconAgent:
                         chapter_num=0 
                     )
 
+        # 🔥 P11: Causality Taint Analysis (Ripple Effect Check)
+        if not dry_run:
+            affected_entities = set()
+            for update in plan.get("entity_updates", []):
+                affected_entities.add(update["name"])
+            for rel in plan.get("relationship_updates", []):
+                affected_entities.add(rel["source"])
+            
+            for entity in affected_entities:
+                tainted = self.memory.graph.get_downstream_dependencies(entity, depth=2)
+                if tainted:
+                    warning = f"⚠️ [Ripple Warning] Modifying '{entity}' may impact downstream entities: {', '.join(tainted[:5])}..."
+                    logs.append(warning)
+                    # Optional: Log to system event for Director to see
+                    self.memory.log_event(0, "SYSTEM", "RETCON_WARNING", warning)
+
         # 3. Patch Events / VectorDB (Inject Retcon Knowledge)
         # 我们不删除旧向量，而是注入一条“高优先级”的修正规则进入 World Bible 或特殊 Retcon Collection
         for patch in plan.get("event_patches", []):

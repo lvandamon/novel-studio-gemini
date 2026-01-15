@@ -151,12 +151,27 @@ class ContextManager:
         
         # Hooks selection
         all_hooks = self.memory.get_active_foreshadowing()
+        stale_hooks = self.memory.get_stale_unresolved_hooks(limit=3) # 🔥 P6: Force inject old hooks
+        
         hook_lines = []
+        
+        # 1. Stale Hooks (强制提醒)
+        if stale_hooks:
+            hook_lines.append("‼️ [必须填坑/回扣] 以下伏笔已埋藏很久，请尝试推进或解决：")
+            for h in stale_hooks:
+                hook_lines.append(f"   - (自Ch{h['chapter_created']}) {h['content']}")
+        
+        # 2. Active/Recent Hooks
         for h in all_hooks:
+            # 避免重复
+            if any(sh['id'] == h['id'] for sh in stale_hooks):
+                continue
+                
             if h.get('importance', 5) >= 8:
                 hook_lines.append(f"‼️ [核心悬念] {h['content']}")
             elif intent["needs_hooks"]:
                 hook_lines.append(f"- [线索] {h['content']}")
+                
         active_hooks = "\n".join(hook_lines)
 
         state_text = f"""
