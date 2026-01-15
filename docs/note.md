@@ -9,3 +9,7 @@ uv run streamlit run app.py
 # 启动 CLI 应用
 
 uv run python main.py
+
+# 启动 FastAPI 应用
+
+uv run uvicorn api.main:app --reload --port 8000

@@ -1,0 +1,13 @@
+@import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&family=Inter:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-gray-50 text-ink font-sans;
+}
+
+.editor-content {
+  @apply font-serif text-lg leading-loose p-8 bg-paper text-ink shadow-sm outline-none resize-none w-full h-full rounded-lg border border-gray-100 focus:border-gray-200 transition-colors;
+}
