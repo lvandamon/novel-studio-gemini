@@ -1999,6 +1999,70 @@ class MemoryManager:
             ''', (notes, clue_id))
             print(f"   ❌ 伏笔 ID:{clue_id} 人工驳回回收，保持活跃")
 
+    # --- 动态大纲与历史修正 (Dynamic Planning & RETCON) ---
+
+    def update_active_plan_goals(self, volume_goal: str = None, arc_goal: str = None, reason: str = "Director Adjustment"):
+        """
+        🔥 P7新增: 允许导演动态修改大纲目标
+        赋予 Director 真正的战略调整权，而非死守过时的大纲。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 1. Update Volume Goal
+        if volume_goal:
+            cursor.execute('''
+                UPDATE volumes 
+                SET goal = ? 
+                WHERE status = ? 
+            ''', (volume_goal, ArcStatus.ACTIVE.value))
+            if cursor.rowcount > 0:
+                print(f"   🔄 [Plan Mutation] Volume Goal Updated: {volume_goal[:30]}... (Reason: {reason})")
+
+        # 2. Update Arc Goal
+        if arc_goal:
+            cursor.execute('''
+                UPDATE arcs 
+                SET goal = ? 
+                WHERE status = ? 
+            ''', (arc_goal, ArcStatus.ACTIVE.value))
+            if cursor.rowcount > 0:
+                print(f"   🔄 [Plan Mutation] Arc Goal Updated: {arc_goal[:30]}... (Reason: {reason})")
+
+        conn.commit()
+        conn.close()
+
+    def invalidate_event(self, event_id: int, reason: str):
+        """
+        🔥 P7新增: 真正的 RETCON (伪史标记)
+        将事件标记为无效，使其在后续检索中被过滤，但在数据库中保留以备审计。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 1. 尝试添加 is_valid 列 (如果不存在)
+        try:
+            cursor.execute('ALTER TABLE events ADD COLUMN is_valid BOOLEAN DEFAULT 1')
+        except: 
+            pass # 列已存在
+            
+        # 2. 标记为无效
+        cursor.execute('''
+            UPDATE events 
+            SET is_valid = 0, 
+                description = description || ' [RETCONNED: ' || ? || ']' 
+            WHERE id = ?
+        ''', (reason, event_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # 3. Vector DB 软删除 (通过 metadata 标记)
+        # Chroma 不支持直接 update metadata 方便地，通常需要 delete + add
+        # 这里简化处理：我们相信 SQL 是 Source of Truth。
+        # 在检索 get_relevant_events 时，应该过滤 SQL 的 is_valid。
+        print(f"   🚫 [RETCON] 事件 ID:{event_id} 已标记为伪史。原因: {reason}")
+
         conn.commit()
         conn.close()
 

@@ -169,9 +169,8 @@ class ArchivistAgent:
                 print(f"   ❌ 逻辑验证未通过！发现 {len(issues)} 个冲突。")
                 print(error_msg)
                 
-                # 🔥 P7临时调整: 压力测试期间降级为警告，不阻断流程
-                print("   ⚠️ [StressTest Mode] 忽略逻辑阻断，强制放行。")
-                # raise ValueError(f"逻辑一致性校验失败 (Consistency Violation):\n{error_msg}")
+                # 🔥 P7修复: 恢复严格模式，阻断逻辑冲突
+                raise ValueError(f"逻辑一致性校验失败 (Consistency Violation):\n{error_msg}")
             
             elif status == "PASS":
                 print("   ✅ 逻辑验证通过。")

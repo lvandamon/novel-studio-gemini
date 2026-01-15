@@ -36,6 +36,7 @@ class NovelState(TypedDict):
     director_ran: bool
     requires_director_review: bool  # 🔥 P1新增: 标记需要Director特殊审查
     high_risk_flag: bool  # 🔥 P1新增: 标记高风险章节(Simulator多次驳回)
+    archivist_rejected: bool # 🔥 P7新增: 档案员逻辑驳回标记
 
 from agents.foreshadowing_agent import ForeshadowingAgent
 
@@ -227,21 +228,41 @@ class NovelWorkflow:
     def node_archivist_save(self, state: NovelState) -> NovelState:
         """Node 5: Archivist (Persistence)"""
         print(f"\n🗄️ === Workflow: Archiving ===")
-        # 1. 基础归档 (Fact Extraction)
-        self.archivist.archive_chapter(state["draft_content"], state["chapter_num"])
+        import json
         
-        # 2. 深度伏笔分析 (Clue Hunting)
-        # Archivist 虽然也提取伏笔，但 ForeshadowingAgent 更专业，且负责更新状态
-        self.foreshadowing_agent.analyze_hooks(state["draft_content"], state["chapter_num"])
-        
-        # Append Reader Feedback to Final Content for human review
-        reader_fb = state.get("reader_feedback", {})
-        fb_str = f"\n\n--- 📊 读者反馈报告 ---\nMood: {reader_fb.get('reader_mood')}\nBoredom: {reader_fb.get('boredom_score')}\nExpectation: {reader_fb.get('expectation_score')}\nComment: {reader_fb.get('comment')}\n"
-        
-        state["final_content"] = state["draft_content"] + fb_str
+        try:
+            # 1. 基础归档 (Fact Extraction)
+            # 🔥 P7修正: 捕捉 Archivist 的 ValueError (逻辑冲突)
+            self.archivist.archive_chapter(state["draft_content"], state["chapter_num"])
+            
+            # 2. 深度伏笔分析 (Clue Hunting)
+            self.foreshadowing_agent.analyze_hooks(state["draft_content"], state["chapter_num"])
+            
+            # Append Reader Feedback
+            reader_fb = state.get("reader_feedback", {})
+            fb_str = f"\n\n--- 📊 读者反馈报告 ---\nMood: {reader_fb.get('reader_mood')}\nBoredom: {reader_fb.get('boredom_score')}\nExpectation: {reader_fb.get('expectation_score')}\nComment: {reader_fb.get('comment')}\n"
+            
+            state["final_content"] = state["draft_content"] + fb_str
+            state["archivist_rejected"] = False
+            
+        except ValueError as e:
+            print(f"   🛑 Archivist 拒绝归档: {e}")
+            # 构造反馈给 Editor/Writer
+            err_msg = str(e)
+            state["review_feedback"] = json.dumps({
+                "status": "BLOCK",
+                "suggestion": f"【历史一致性致命错误】档案员拒绝归档。原因：\n{err_msg}\n请修改剧情以符合历史设定，或联系导演进行RETCON。"
+            }, ensure_ascii=False)
+            state["archivist_rejected"] = True
+            
         return state
 
     # --- Edge Logic ---
+
+    def check_archivist_status(self, state: NovelState) -> Literal["approved", "rejected"]:
+        if state.get("archivist_rejected"):
+            return "rejected"
+        return "approved"
 
     def check_simulator_status(self, state: NovelState) -> Literal["approve", "reject"]:
         feedback = state.get("simulator_feedback", "")
@@ -357,6 +378,15 @@ class NovelWorkflow:
         )
         
         workflow.add_edge("reader", "archivist") # Reader -> Archivist
-        workflow.add_edge("archivist", END)
+        
+        # 🔥 P7修正: Archivist 驳回逻辑闭环
+        workflow.add_conditional_edges(
+            "archivist",
+            self.check_archivist_status,
+            {
+                "approved": END,
+                "rejected": "editor" # 严重历史冲突，打回 Editor 重构大纲
+            }
+        )
         
         return workflow.compile()
