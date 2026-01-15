@@ -94,6 +94,27 @@ class DynamicAnchorManager:
         conn.close()
         print(f"   ⚓️ Anchor Added: {character_name} [{category}] (Epoch {epoch_id})")
 
+    def add_trauma(self, character_name: str, content: str, origin_event: str, intensity: int = 5):
+        """
+        🔥 P10新增: 添加心理创伤/执念 (Trauma/Obsession)
+        创伤是一种特殊的负面锚点，直接影响潜意识(System Prompt)。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 使用特殊的 category = 'Trauma'
+        # 存储 intensity 到 tags 或 metadata? 这里简单存入 tags
+        tags = ["Trauma", f"Intensity:{intensity}", origin_event]
+        
+        cursor.execute('''
+            INSERT INTO character_anchors (character_name, category, content, tags, status, is_active) 
+            VALUES (?, 'Trauma', ?, ?, 'active', 1)
+        ''', (character_name, content, json.dumps(tags)))
+        
+        conn.commit()
+        conn.close()
+        print(f"   💔 Trauma Added: {character_name} -> {content} (Int:{intensity})")
+
     def shatter_anchor(self, anchor_id: int, reason: str, chapter_num: int):
         """击碎/废弃某个锚点"""
         conn = self._get_connection()
@@ -152,10 +173,28 @@ class DynamicAnchorManager:
         if active_rows:
             lines.append("【绝对准则 (Active Anchors)】:")
             for cat, content, tags_json in active_rows:
+                if cat == 'Trauma': continue # Skip trauma here, handle below
+                
                 tags = json.loads(tags_json) if tags_json else []
                 tag_str = f" [触发: {', '.join(tags)}]" if tags else ""
                 lines.append(f"- [{cat}]{tag_str} {content}")
+
+        # Extract Traumas
+        traumas = [row for row in active_rows if row[0] == 'Trauma']
+        if traumas:
+            lines.append("【💔 心理创伤/执念 (Subconscious Scars)】:")
+            for _, content, tags_json in traumas:
+                tags = json.loads(tags_json) if tags_json else []
+                # Extract intensity and origin
+                intensity = "5"
+                origin = "Unknown"
+                for t in tags:
+                    if t.startswith("Intensity:"): intensity = t.split(":")[1]
+                    elif t not in ["Trauma", "Intensity"]: origin = t
                 
+                lines.append(f"- (Level {intensity}) {content} [源于: {origin}]")
+                lines.append(f"  -> 指令: 在涉及相关情境时，必须体现出痛苦、回避或偏执。")
+
         if shattered_rows:
             lines.append("【已破碎的旧我 (Shattered Past - Do NOT Revert)】:")
             for cat, content, logic in shattered_rows:

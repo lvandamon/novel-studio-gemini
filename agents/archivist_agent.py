@@ -365,6 +365,21 @@ class ArchivistAgent:
                 self.memory.update_world_date(extraction.current_date)
                 print(f"   📅 日期更新: {extraction.current_date}")
 
+            # 🔥 P5新增: 提取高光纹理 (Texture Vault)
+            # 使用 LLM 或正则快速提取本章的金句/感官描写 (这里复用 extraction 中的字段，需修改 Prompt)
+            # 暂时，我们假设 extraction 结果中包含了 highlights 字段 (需要在 Schema 中增加)
+            if hasattr(extraction, "highlights") and extraction.highlights:
+                 for h in extraction.highlights:
+                     self.memory.save_highlight(
+                         content=h.content,
+                         metadata={
+                             "chapter": chapter_num,
+                             "type": h.type, # Sensory, Dialogue, etc.
+                             "tags": ",".join(h.tags),
+                             "emotion": h.emotion
+                         }
+                     )
+            
             # 9. 触发分级摘要聚合 (Fractal Memory)
             self.summarizer.trigger_aggregations(chapter_num)
 

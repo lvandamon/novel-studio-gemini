@@ -148,6 +148,12 @@ class GraphTripletSchema(BaseModel):
     desc: str = ""
     is_negated: bool = False # 如果为 True，表示删除该关系
 
+class HighlightSchema(BaseModel):
+    content: str
+    type: str = "Sensory" # Sensory, Dialogue, Action, InnerMonologue
+    tags: List[str] = Field(default_factory=list)
+    emotion: str = "Neutral"
+
 class ChapterExtractionSchema(BaseModel):
     summary: str
     characters: List[Dict[str, Any]] 
@@ -156,5 +162,6 @@ class ChapterExtractionSchema(BaseModel):
     new_foreshadowing: List[ForeshadowingSchema]
     resolved_foreshadowing_ids: List[int] = Field(default_factory=list)
     character_evolutions: List[CharacterEvolutionSchema] = Field(default_factory=list) # 🔥 P9新增: 角色性格演化事件
+    highlights: List[HighlightSchema] = Field(default_factory=list) # 🔥 P5新增: 高光时刻提取
     world_updates: List[Dict[str, Any]] = Field(default_factory=list)
     current_date: str = Field(..., description="更新后的世界日期")

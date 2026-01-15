@@ -381,7 +381,8 @@ class NovelWorkflow:
             self.check_simulator_status,
             {
                 "approve": "writer",
-                "reject": "editor"
+                "reject": "editor",
+                "intervention": END  # Stop workflow for human intervention
             }
         )
         

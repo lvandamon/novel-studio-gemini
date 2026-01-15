@@ -1022,6 +1022,57 @@ class MemoryManager:
         
         return "\n".join(lines)
 
+    # --- 高光时刻库 (Highlight Texture Vault) ---
+
+    def save_highlight(self, content: str, metadata: Dict[str, Any]):
+        """
+        🔥 P5新增: 保存高光时刻 (Texture)
+        
+        Args:
+            content: 原文片段 (Quote, Description, Sensory detail)
+            metadata: {
+                "chapter": int,
+                "type": str (e.g. "Sensory", "Dialogue", "Action"),
+                "tags": str (comma separated),
+                "emotion": str
+            }
+        """
+        try:
+            # 自动生成 ID
+            import uuid
+            hid = str(uuid.uuid4())
+            
+            # 丰富元数据
+            metadata["source"] = "novel_highlight"
+            metadata["timestamp"] = str(time.time())
+            
+            self.highlight_store.add_documents([
+                Document(page_content=content, metadata=metadata, id=hid)
+            ])
+            print(f"   ✨ Highlight Saved: [{metadata.get('type')}] {content[:20]}...")
+        except Exception as e:
+            print(f"   ⚠️ Highlight Save Failed: {e}")
+
+    def retrieve_highlights(self, query: str, k: int = 3) -> str:
+        """
+        🔥 P5新增: 检索高光时刻 (Texture Retrieval)
+        用于在后续章节中重现"那一种感觉"。
+        """
+        try:
+            docs = self.highlight_store.similarity_search(query, k=k)
+            if not docs:
+                return ""
+                
+            lines = ["# 🎞️ 情感闪回/高光纹理 (Texture & Resonance)"]
+            for doc in docs:
+                # 格式: "Quote..." (ChX, Sensory)
+                meta = doc.metadata
+                lines.append(f"> \"{doc.page_content}\" (Ch{meta.get('chapter')}, {meta.get('type')})")
+            return "\n".join(lines)
+        except Exception as e:
+            print(f"   ⚠️ Highlight Retrieval Failed: {e}")
+            return ""
+
     # --- 角色操作 (UUID Core) ---
 
     def _get_id_by_name(self, name: str) -> Optional[str]:
