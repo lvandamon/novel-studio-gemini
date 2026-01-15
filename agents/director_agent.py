@@ -73,13 +73,25 @@ class DirectorAgent:
             # 简单的图形化表示
             tension_bar = "🔥" * (h['tension'] // 20)
             pacing_bar = "⏩" * (h['pacing'] // 20)
-            lines.append(f"- Ch{h['chapter']}: Tension {h['tension']} {tension_bar} | Pacing {h['pacing']} {pacing_bar} | Logic {h['plot_logic']}")
+            boredom_bar = "😴" * (h.get('reader_boredom', 0) // 20)
+            
+            line = f"- Ch{h['chapter']}: Tension {h['tension']} {tension_bar} | Pacing {h['pacing']} {pacing_bar}"
+            if 'reader_boredom' in h:
+                line += f" | Boredom {h['reader_boredom']} {boredom_bar}"
+            line += f" | Logic {h['plot_logic']}"
+            
+            lines.append(line)
             avg_tension += h['tension']
             
         avg_tension /= len(recent)
         trend = "平稳"
         if avg_tension > 75: trend = "高压 (High Tension)"
         elif avg_tension < 30: trend = "松弛 (Low Tension)"
+        
+        # 🆕 检测读者倦怠
+        avg_boredom = sum(h.get('reader_boredom', 50) for h in recent) / len(recent)
+        if avg_boredom > 70:
+            trend += " | ⚠️ 读者倦怠 (Reader Boredom High)"
         
         return f"趋势分析: {trend} (Avg Tension: {avg_tension:.1f})\n" + "\n".join(lines)
 

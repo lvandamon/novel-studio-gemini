@@ -219,6 +219,13 @@ class MemoryManager:
             cursor.execute('ALTER TABLE foreshadowing ADD COLUMN tags TEXT')
         except: pass
 
+        try:
+            cursor.execute('ALTER TABLE chapter_metrics ADD COLUMN reader_boredom INTEGER DEFAULT 50')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE chapter_metrics ADD COLUMN reader_expectation INTEGER DEFAULT 50')
+        except: pass
+
         # Style Guide Migrations
         try:
             cursor.execute('ALTER TABLE style_guide ADD COLUMN source TEXT DEFAULT "manual"')
@@ -323,6 +330,8 @@ class MemoryManager:
                 tension INTEGER, -- 0-100
                 tone_darkness INTEGER, -- 0-100 (越高越压抑)
                 pacing_score INTEGER, -- 0-100 (越高越快)
+                reader_boredom INTEGER DEFAULT 50, -- 🆕 0-100 (越高越无聊)
+                reader_expectation INTEGER DEFAULT 50, -- 🆕 0-100 (越高越期待)
                 character_consistency_score INTEGER, -- 0-100 (100为完美一致)
                 plot_logic_score INTEGER, -- 0-100 (100为无漏洞)
                 critique TEXT,
@@ -606,12 +615,14 @@ class MemoryManager:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO chapter_metrics (chapter_num, tension, tone_darkness, pacing_score, character_consistency_score, plot_logic_score, critique)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO chapter_metrics (chapter_num, tension, tone_darkness, pacing_score, reader_boredom, reader_expectation, character_consistency_score, plot_logic_score, critique)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chapter_num) DO UPDATE SET
                 tension=excluded.tension,
                 tone_darkness=excluded.tone_darkness,
                 pacing_score=excluded.pacing_score,
+                reader_boredom=excluded.reader_boredom,
+                reader_expectation=excluded.reader_expectation,
                 character_consistency_score=excluded.character_consistency_score,
                 plot_logic_score=excluded.plot_logic_score,
                 critique=excluded.critique
@@ -620,12 +631,14 @@ class MemoryManager:
             metrics.get("tension", 50),
             metrics.get("tone_darkness", 50),
             metrics.get("pacing_score", 50),
+            metrics.get("reader_boredom", 50),
+            metrics.get("reader_expectation", 50),
             metrics.get("character_consistency_score", 100),
             metrics.get("plot_logic_score", 100),
             metrics.get("critique", "")
         ))
         conn.close()
-        print(f"📈 Metrics Logged for Ch{chapter_num}: Tension={metrics.get('tension')}")
+        print(f"📈 Metrics Logged for Ch{chapter_num}: Tension={metrics.get('tension')}, Boredom={metrics.get('reader_boredom')}")
 
     def get_metrics_history(self, limit: int = 20) -> List[Dict[str, Any]]:
         """获取最近的遥测数据，用于绘制图表"""

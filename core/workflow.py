@@ -113,16 +113,19 @@ class NovelWorkflow:
         roster = self.memory.get_character_roster_brief()
         
         # 2. Extract potential characters for Causal Lookup
-        # 策略：从 Narratice Focus 的 goal 和上一章摘要中提取提到的角色
+        # 策略：从 Narrative Focus 的 goal、上一章摘要、以及【伏笔建议】中提取提到的角色
         focus = state.get("narrative_focus", {})
         prev_summary = self.memory.get_chapter_summary(state["chapter_num"] - 1)
-        potential_chars = self.memory._extract_entities_semantically(f"{focus.get('goal', '')} {prev_summary}")
         
-        # 获取这些角色的因果上下文
-        causal_context = self.editor._get_causal_context(potential_chars)
-
-        # 3. Get Foreshadowing Suggestions
+        # 🆕 获取伏笔建议并从中提取角色
         hook_suggestions = self.foreshadowing_agent.suggest_callbacks(state["chapter_num"], current_location=None)
+        
+        # 合并所有文本进行实体提取
+        search_text = f"{focus.get('goal', '')} {prev_summary} {hook_suggestions}"
+        potential_chars = self.memory._extract_entities_semantically(search_text)
+        
+        # 获取这些角色的因果上下文 (包括从第一卷到现在的恩怨)
+        causal_context = self.editor._get_causal_context(potential_chars)
 
         full_context = f"""
 {base_context}
@@ -130,11 +133,8 @@ class NovelWorkflow:
 ## 5. 角色分布 (Roster)
 {roster}
 
-## 6. 伏笔回收建议 (Callbacks)
+## 6. 伏笔回收建议 (Callbacks - Priority)
 {hook_suggestions}
-
-## 7. 上一轮模拟反馈 (如果有)
-{state.get('simulator_feedback', '无')}
 """
 
         outline_data = self.editor.generate_outline(state["chapter_num"], full_context, causal_context=causal_context)
@@ -238,8 +238,19 @@ class NovelWorkflow:
             # 2. 深度伏笔分析 (Clue Hunting)
             self.foreshadowing_agent.analyze_hooks(state["draft_content"], state["chapter_num"])
             
-            # Append Reader Feedback
+            # 🆕 3. 同步读者指标到遥测数据库
             reader_fb = state.get("reader_feedback", {})
+            if reader_fb:
+                metrics = {
+                    "reader_boredom": reader_fb.get("boredom_score", 50),
+                    "reader_expectation": reader_fb.get("expectation_score", 50),
+                    "critique": f"Reader Comment: {reader_fb.get('comment', '')}"
+                }
+                # 注意：这里是更新已有记录（Reviewer已经创建了基础记录）
+                self.memory.log_chapter_metrics(state["chapter_num"], metrics)
+                print(f"   📊 读者遥测数据已同步: Boredom={metrics['reader_boredom']}")
+
+            # Append Reader Feedback to final text for human reading
             fb_str = f"\n\n--- 📊 读者反馈报告 ---\nMood: {reader_fb.get('reader_mood')}\nBoredom: {reader_fb.get('boredom_score')}\nExpectation: {reader_fb.get('expectation_score')}\nComment: {reader_fb.get('comment')}\n"
             
             state["final_content"] = state["draft_content"] + fb_str
