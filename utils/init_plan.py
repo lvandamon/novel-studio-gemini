@@ -1,8 +1,8 @@
 from core.memory import MemoryManager
 from core.schemas import ArcStatus
 
-def init_plan():
-    memory = MemoryManager()
+def init_plan(memory_manager=None):
+    memory = memory_manager if memory_manager else MemoryManager()
     
     print("Checking existing plan...")
     # 1. Check if plan exists

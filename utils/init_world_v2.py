@@ -1,11 +1,11 @@
 from core.memory import MemoryManager
 from utils.init_plan import init_plan
 
-def init_world_v2():
+def init_world_v2(memory_manager=None):
+    memory = memory_manager if memory_manager else MemoryManager()
+
     # 1. Init Plan
-    init_plan()
-    
-    memory = MemoryManager()
+    init_plan(memory)
     
     print("\nInitializing Characters for V2 Test...")
     

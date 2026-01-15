@@ -15,3 +15,6 @@ wheels/
 
 #db
 data/
+
+#output
+novel_output/

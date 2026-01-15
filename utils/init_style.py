@@ -1,8 +1,8 @@
 from core.memory import MemoryManager
 import sys
 
-def init_style_data():
-    memory = MemoryManager()
+def init_style_data(memory_manager=None):
+    memory = memory_manager if memory_manager else MemoryManager()
     
     print("🖋️ 正在初始化 Style Guide (文风样板)...")
     

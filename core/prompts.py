@@ -450,13 +450,31 @@ ARCHIVIST_VALIDATION_PROMPT = ChatPromptTemplate.from_messages(
 
 # --- Summarizer Agent (DeepSeek-V3) Prompts ---
 
-SUMMARIZER_SYSTEM_PROMPT = """你是专业的网文编辑，擅长进行剧情浓缩。
-你的任务是将【章节正文】提炼为 200-300 字的精炼摘要。
+SUMMARIZER_SYSTEM_PROMPT = """你是专业的网文编辑与“情感捕捉者”。
+你的任务是阅读【章节正文】，并输出一个 JSON 对象（严禁包含 Markdown）。
 
-要求：
-1. **保留主线**：明确发生了什么核心事件。
-2. **记录伏笔**：如果有明显的伏笔埋下或伏笔回收，请在摘要中提及。
-3. **忽略水文**：忽略单纯的打斗细节或环境描写，只保留结果。
+你需要完成两个维度的提取：
+1. **剧情摘要 (summary)**：
+   - 200-300字，客观、冷静、去修辞。
+   - 记录核心事件、伏笔变动和因果链条。
+   - 忽略打斗细节和环境描写，只写结果。
+
+2. **高光时刻 (highlights)**：
+   - 提取 1-3 个**原汁原味**的原文片段。
+   - 标准：情感浓度最高、画面感最强、或最能体现人物性格的段落（如：一句震撼的台词、一段惨烈的受伤描写、一个绝美的环境特写）。
+   - 必须是**原文复制**，不要改写！
+
+输出格式：
+{{
+    "summary": "...",
+    "highlights": [
+        {{
+            "content": "原文片段...",
+            "tags": ["愤怒", "复仇"], // 情感/主题标签
+            "sentiment": "Negative" // Positive/Negative/Neutral
+        }}
+    ]
+}}
 """
 
 SUMMARIZER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
@@ -464,7 +482,7 @@ SUMMARIZER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
         ("system", SUMMARIZER_SYSTEM_PROMPT),
         (
             "user",
-            "\n    【章节正文】：\n    {content}\n\n    请生成摘要。\n    ",
+            "\n    【章节正文】：\n    {content}\n\n    请提取摘要与高光。\n    ",
         ),
     ]
 )
@@ -783,4 +801,55 @@ CHAPTER_OUTLINE_PROMPT = ChatPromptTemplate.from_template("""
     ...
 ]
 """)
+
+# --- Soul Mirror (Drift Detector) Prompts ---
+
+SOUL_MIRROR_SYSTEM_PROMPT = """你是一个【角色灵魂镜像 (Soul Mirror)】。
+你的任务是进行一场图灵测试：判断小说中的角色行为是否符合其原始设定。
+
+我将为你提供：
+1. **角色核心设定 (Core Anchors)**：这是角色的灵魂底色，绝对不可违背。
+2. **当前情境 (Situation)**：角色正面临的处境。
+3. **实际表现 (Actual Text)**：作者写出来的角色反应。
+
+请分两步思考：
+Step 1: **模拟 (Simulation)**
+  - 忘掉“实际表现”。
+  - 仅基于“核心设定”和“当前情境”，推演该角色此时此刻**本该**有的心理活动和行动。
+  - 用第一人称写一段独白。
+
+Step 2: **判决 (Verdict)**
+  - 对比你的模拟结果与作者的“实际表现”。
+  - 判断二者在**内在逻辑**和**情感基调**上是否一致。
+  - 允许外在行为不同（比如你想骂人但忍住了，作者写的是冷笑），但**动机**必须一致。
+
+输出 JSON：
+{{
+    "simulation": "你的第一人称模拟独白...",
+    "consistency_score": 0-100, // 100=完美契合, <60=OOC(崩人设)
+    "verdict": "PASS" | "FAIL",
+    "reason": "简述理由，如果FAIL，指出具体违背了哪条锚点"
+}}
+"""
+
+SOUL_MIRROR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SOUL_MIRROR_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+【角色核心设定 (Anchors)】：
+{anchors}
+
+【当前情境 (Situation)】：
+{situation}
+
+【实际表现 (Actual Text)】：
+{actual_text}
+
+请开始镜像测试。
+""",
+        ),
+    ]
+)
 

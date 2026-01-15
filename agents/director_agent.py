@@ -7,6 +7,7 @@ from core.prompts import DIRECTOR_EVALUATE_PROMPT, DIRECTOR_SYSTEM_PROMPT
 from core.memory import MemoryManager
 from core.chaos import ChaosEngine
 from core.json_repair import repair_and_parse, clean_json, JSONRepairError
+from agents.drift_detector import DriftDetector # 🔥 P4新增
 
 class DirectorAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -15,6 +16,7 @@ class DirectorAgent:
         self.chain = DIRECTOR_EVALUATE_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
         self.chaos_engine = ChaosEngine(memory_manager=self.memory, base_probability=0.2) 
+        self.drift_detector = DriftDetector(memory_manager) # 🔥 P4新增: 性格漂移监测
 
     def _clean_json(self, text: str) -> str:
         """
@@ -30,7 +32,7 @@ class DirectorAgent:
         
         从图谱和数据库中提取深层结构信息，防止导演"瞎指挥"。
         1. 待处理伏笔 (Open Hooks)
-        2. 活跃因果链 (Active Causal Chains)
+        2. 未闭环冲突 (Open Conflicts) - 🔥 P5升级: 直接从图谱获取
         """
         # 1. 获取伏笔
         hooks = self.memory.get_active_foreshadowing()
@@ -44,47 +46,15 @@ class DirectorAgent:
                 lines.append(f"- {imp_mark} [ID:{h['id']}] (Ch{h['chapter']}) {h['content']}")
             hooks_text = "\n".join(lines)
             
-        # 2. 获取活跃因果链 (Graph Check)
-        # 策略：查找最近 50 章内的 'Major' 或 'Climax' 事件
-        # 我们直接用 SQL 查 events 表拿到 UID，然后去 Graph 查
-        conn = self.memory._get_connection()
-        cursor = conn.cursor()
-        
-        # 只看最近发生的重大事件 (作为因果链的"果"，去追溯"因")
-        start_search = max(1, current_chapter - 20)
-        cursor.execute('''
-            SELECT id, event_type, description, character_name 
-            FROM events 
-            WHERE chapter_num >= ? AND event_type IN ('Major', 'Climax', 'Core')
-            ORDER BY chapter_num DESC
-            LIMIT 3
-        ''', (start_search,))
-        
-        recent_major_events = cursor.fetchall()
-        conn.close()
-        
-        causal_text = "无显著近期因果链"
-        if recent_major_events:
-            chains = []
-            for evt in recent_major_events:
-                eid, etype, desc, chars = evt
-                # 查询该事件的前因后果
-                # depth=2 足够看到直接的前因
-                chain_str = self.memory.graph.query_causal_chain(str(eid), depth=2, include_core_events=False)
-                if "无明确因果" not in chain_str and "SQL降级" not in chain_str:
-                     chains.append(f"### 事件 [{etype}] {desc} ({chars})\n{chain_str}")
-                elif "SQL降级" in chain_str:
-                     chains.append(f"### 事件 [{etype}] {desc}\n{chain_str}")
-                     
-            if chains:
-                causal_text = "\n\n".join(chains)
+        # 2. 获取未闭环冲突 (Open Conflicts)
+        conflict_text = self.memory.graph.get_unresolved_conflicts(limit=10)
         
         return f"""
-=== 🎣 待回收伏笔 (Open Loops) ===
+=== 🎣 待回收伏笔 (Open Hooks) ===
 {hooks_text}
 
-=== 🕸️ 活跃因果链 (Active Causal Chains) ===
-{causal_text}
+=== ⚔️ 未闭环冲突 (Open Conflicts - Must Resolve) ===
+{conflict_text}
 """
 
     def _format_telemetry(self, current_chapter: int) -> str:
@@ -113,12 +83,35 @@ class DirectorAgent:
         
         return f"趋势分析: {trend} (Avg Tension: {avg_tension:.1f})\n" + "\n".join(lines)
 
-    def evaluate_progress(self, current_chapter: int) -> Dict[str, Any]:
+    def evaluate_progress(self, current_chapter: int, high_risk_flag: bool = False) -> Dict[str, Any]:
         """
         审计当前进度，并返回指导意见。
         """
         print(f"🎬 Director: 正在审计第 {current_chapter} 章的叙事进度...")
         
+        # 🔥 P4新增: 紧急避险模式 (Damage Control)
+        risk_context = ""
+        if high_risk_flag:
+            print("   🚨 Director: 接到高风险预警! 启动损管模式 (Damage Control Mode)。")
+            risk_context = """
+!!! 红色警报 (RED ALERT) !!!
+系统检测到前序章节存在严重逻辑隐患或被模拟器多次驳回。
+【指令】: 本次规划必须优先进行“逻辑修复”和“伏笔填坑”。
+1. 暂停推进新的高风险主线。
+2. 通过对话或侧面描写修补之前的逻辑漏洞。
+3. 确保人物动机回归理性。
+"""
+
+        # 🔥 P4新增: 性格漂移检测
+        drift_report = ""
+        if self.drift_detector.should_trigger_detection(current_chapter):
+            print(f"   🧬 Director: 触发周期性性格漂移检测...")
+            drift_report = self.drift_detector.generate_full_report(current_chapter)
+            if "严重漂移" in drift_report:
+                print("   ⚠️ 检测到严重性格漂移，已注入 Director 上下文。")
+            else:
+                print("   ✅ 性格检测通过。")
+
         # 1. 获取上下文数据
         plan = self.memory.get_active_plan()
         focus = self.memory.get_narrative_focus()
@@ -191,6 +184,13 @@ class DirectorAgent:
         
         # 2. 调用 LLM
         try:
+            # 组合额外的 Context
+            combined_telemetry = telemetry_text
+            if risk_context:
+                combined_telemetry += f"\n\n{risk_context}"
+            if drift_report:
+                combined_telemetry += f"\n\n=== 🧬 性格漂移报告 ===\n{drift_report}"
+
             response = self.chain.invoke({
                 "volume_name": plan.get("volume", {}).get("name", "未命名卷"),
                 "volume_goal": plan.get("volume", {}).get("goal", "无"),
@@ -201,7 +201,7 @@ class DirectorAgent:
                 "chapters_used": chapters_used,
                 "end_chapter_estimated": arc_data.get("end_chapter_estimated", "未设定"),
                 "recent_summaries": full_history_context,
-                "telemetry_data": telemetry_text,
+                "telemetry_data": combined_telemetry, # Injected here
                 "current_focus": json.dumps(focus, ensure_ascii=False),
                 "structural_analysis": structural_context,
                 "chaos_injection": chaos_prompt_injection 

@@ -70,10 +70,20 @@ class NovelWorkflow:
             director_interval = 15
 
         # Policy: Run Director on interval OR first chapter
-        if current_chapter % director_interval == 0 or current_chapter == 1:
-            print(f"\n🎥 === Workflow: Director Activation (Ch {current_chapter}, 周期:{director_interval}章) ===")
-            self.director.evaluate_progress(current_chapter)
+        # 🔥 P4: 如果有高风险标记，强制 Director 介入
+        high_risk = state.get("high_risk_flag", False)
+        
+        if current_chapter % director_interval == 0 or current_chapter == 1 or high_risk:
+            reason = "高风险阻断" if high_risk else f"周期:{director_interval}章"
+            print(f"\n🎥 === Workflow: Director Activation (Ch {current_chapter}, 原因: {reason}) ===")
+            
+            self.director.evaluate_progress(current_chapter, high_risk_flag=high_risk)
             state["director_ran"] = True
+            
+            # 如果是高风险触发的，Director 运行后视为已处理（发布了修正指令），重置 flag
+            if high_risk:
+                state["high_risk_flag"] = False
+                print("   ✅ 高风险标记已清除，Director 已接管。")
         else:
             state["director_ran"] = False
 

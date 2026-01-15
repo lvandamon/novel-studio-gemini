@@ -6,6 +6,7 @@ from core.llm import get_deepseek_reasoner, get_deepseek_chat
 from core.prompts import REVIEWER_CHECK_PROMPT, ANCHOR_VIOLATION_CHECK_PROMPT
 from core.memory import MemoryManager
 from core.physics_validator import PhysicsValidator  # 🔥 P1新增
+from core.style_checker import StyleChecker  # 🔥 P2新增
 
 class ReviewerAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -14,6 +15,7 @@ class ReviewerAgent:
         self.chain = REVIEWER_CHECK_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
         self.physics_validator = PhysicsValidator(memory_manager)  # 🔥 P1新增
+        self.style_checker = StyleChecker() # 🔥 P2新增: 文风质检
 
         # 🔥 P0新增: 锚点校验专用轻量LLM (快速校验)
         self.anchor_validator_llm = get_deepseek_chat(temperature=0.1)
@@ -163,6 +165,31 @@ class ReviewerAgent:
                 }
             })
 
+        # 🔥 P2新增: 文风一致性检查 (Style Check)
+        # 获取当前意图对应的样板 (简单起见，取通用和当前类型的)
+        # 这里我们假设一个默认类型，或者应该从外部传入 intent? 
+        # 为了不修改接口签名太复杂，我们先取通用的 'Narrative' 和 'Description'
+        style_samples = self.memory.get_style_sample_list(tags=["Narrative", "Action", "Scenery"], limit=5)
+        style_result = self.style_checker.check_style_consistency(content, style_samples)
+        
+        style_report = ""
+        style_score = style_result['score']
+        if not style_result['passed']:
+            print(f"   ⚠️ 文风一致性警告 (Score: {style_score:.1f})")
+            print(f"   {style_result['drift_details']}")
+            style_report = f"\n【文风一致性警告】\n得分仅 {style_score:.1f}/100。检测到文风漂移：\n{style_result['drift_details']}\n请调整笔触，保持与前文一致的语感。"
+
+            # 如果分数极低，可以考虑阻断
+            if style_score < 50:
+                 return json.dumps({
+                    "status": "BLOCK",
+                    "suggestion": f"❌ 文风严重崩坏 (Score {style_score})。{style_result['drift_details']}",
+                    "metrics": {
+                        "style_score": style_score,
+                        "plot_logic_score": 60, # 降级
+                    }
+                })
+
         # 🔥 P0新增: 后置锚点校验 (OOC检测)
         anchor_validation = self._validate_anchors_post_generation(content, active_characters, chapter_num)
         if anchor_validation["has_violation"] and anchor_validation["max_severity"] == "CRITICAL":
@@ -196,6 +223,8 @@ class ReviewerAgent:
 
 【物理约束验证】
 {physics_report}
+
+{style_report}
 """
             # Format Narrative Focus
             focus_text = f"""
@@ -220,6 +249,7 @@ class ReviewerAgent:
             # 4. 记录遥测数据
             metrics = result_data.get("metrics", {})
             metrics["critique"] = result_data.get("critique", "")
+            metrics["style_score"] = style_score # 记录文风分
             
             self.memory.log_chapter_metrics(chapter_num, metrics)
             

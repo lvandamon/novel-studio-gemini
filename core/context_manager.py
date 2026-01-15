@@ -543,7 +543,16 @@ class ContextManager:
             # 2. 重要性等级
             char = self.memory.get_character(char_name)
             if char:
-                importance = char.get('importance', 5)  # 1-10
+                importance_raw = char.get('importance', 5)
+                # 🔥 P8修复: 兼容字符串类型的 importance
+                if isinstance(importance_raw, str):
+                    imp_map = {
+                        "Protagonist": 10, "Major": 8, "Minor": 5, "NPC": 2
+                    }
+                    importance = imp_map.get(importance_raw, 1)
+                else:
+                    importance = int(importance_raw)
+                
                 score += (importance / 10) * 25
 
                 # 3. 近期活跃度 (最近10章出现次数)
@@ -750,7 +759,10 @@ class ContextManager:
         # --- 1.5. Physicality Engine (物理法则层 - 不可压缩) ---
         physics_text = self.physics_engine.get_hard_constraints_for_prompt(active_characters, scene_location)
         
-        current_budget = self.total_budget - self._count_tokens(bible_text) - self._count_tokens(physics_text)
+        # --- 1.6 Entity Ledger (硬逻辑账本 - 不可压缩) ---
+        ledger_text = self.memory.get_full_ledger_context(active_characters)
+        
+        current_budget = self.total_budget - self._count_tokens(bible_text) - self._count_tokens(physics_text) - self._count_tokens(ledger_text)
 
         # --- 2. Story State (状态层 - 必须保留，但可轻度压缩) ---
         focus = self.memory.get_narrative_focus()
@@ -913,6 +925,14 @@ class ContextManager:
         target_styles = style_map.get(intent["type"], ["Scenery"])
         style_text = self.memory.get_style_examples(tags=target_styles)
 
+        # 🔥 P5新增: 情感闪回 (Emotional Flashbacks) - The "Soul" Injection
+        # 检索与当前大纲在语义上共鸣的旧日高光
+        flashback_text = ""
+        if intent.get("needs_history") or intent.get("type") in ["Social", "Introspection", "Combat"]:
+             # 使用大纲 + 关键词去检索
+             flashback_query = f"{outline} {intent['type']}"
+             flashback_text = self.memory.retrieve_highlights(flashback_query, k=3)
+
         # 格式化氛围
         atmosphere_text = ""
         if atmosphere:
@@ -924,4 +944,4 @@ class ContextManager:
 - 环境色调 (Color): {atmosphere.get('color_palette', 'N/A')}
 """
 
-        return f"{bible_text}\n{physics_text}\n{vocab_text}\n{state_text}\n{director_instruction}\n{atmosphere_text}\n{style_text}\n{retrieval_optimized}"
+        return f"{bible_text}\n{physics_text}\n{ledger_text}\n{vocab_text}\n{state_text}\n{director_instruction}\n{atmosphere_text}\n{style_text}\n{flashback_text}\n{retrieval_optimized}"

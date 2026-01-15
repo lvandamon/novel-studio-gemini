@@ -3,6 +3,7 @@ import sqlite3
 import json
 import os
 import uuid
+import chromadb # Explicit import
 from typing import List, Dict, Any, Optional
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -27,18 +28,28 @@ class MemoryManager:
         # 1. 初始化 SQLite
         self._init_sqlite()
 
-        # 2. 初始化 ChromaDB
+        # 2. 初始化 ChromaDB (🔥 P7优化: 使用显式 Client 管理生命周期)
+        self.chroma_client = chromadb.PersistentClient(path=self.vector_db_path)
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
         self.vector_store = Chroma(
-            persist_directory=self.vector_db_path,
+            client=self.chroma_client,
+            collection_name="novel_content",
             embedding_function=self.embeddings,
-            collection_name="novel_content"
         )
         
         self.event_store = Chroma(
-            persist_directory=self.vector_db_path,
+            client=self.chroma_client,
+            collection_name="novel_events",
             embedding_function=self.embeddings,
-            collection_name="novel_events"
+        )
+
+        # 🔥 P5新增: 高光时刻库 (Emotional Highlights)
+        # 专门存储"原汁原味"的原文片段,用于对抗摘要的枯燥
+        self.highlight_store = Chroma(
+            client=self.chroma_client,
+            collection_name="novel_highlights",
+            embedding_function=self.embeddings,
         )
         
         # 3. 初始化 Knowledge Graph (Neo4j)
@@ -62,6 +73,12 @@ class MemoryManager:
         # 🔥 P0优化: 启用WAL模式 (Write-Ahead Logging)
         # 优势: 允许并发读写,写入性能提升5-10倍
         cursor.execute("PRAGMA journal_mode=WAL")
+        
+        # 🔥 P7修复: 强制清理残留 WAL，防止锁死
+        try:
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except:
+            pass # 忽略错误，尽力而为
 
         # 🔥 P0优化: 性能调优参数
         cursor.execute("PRAGMA synchronous=NORMAL")  # 平衡安全性与性能
@@ -359,6 +376,20 @@ class MemoryManager:
         ''')
 
         # 🔥 P0新增: 事件备份表 (Neo4j Fallback)
+
+        # Entity Ledger (Hard Logic State)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS entity_ledger (
+                name TEXT PRIMARY KEY,
+                type TEXT NOT NULL, -- Item, Location, Character_State
+                current_state TEXT NOT NULL, -- e.g., "InInventory", "Destroyed", "Cursed"
+                holder TEXT, -- Who holds the item or where the entity is
+                last_updated_chapter INTEGER,
+                metadata TEXT, -- JSON for extra details
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS event_backup (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -419,6 +450,141 @@ class MemoryManager:
 
         conn.commit()
         conn.close()
+
+    # --- Entity Ledger Methods ---
+
+    def update_entity_state(self, name: str, entity_type: str, state: str, 
+                          holder: str = None, chapter_num: int = 0, metadata: Dict = None):
+        """
+        🔥 P4新增: 更新实体状态账本 (The Ledger)
+        用于追踪关键物品、地点状态、角色身体状态等硬逻辑。
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        import json
+        meta_str = json.dumps(metadata, ensure_ascii=False) if metadata else "{}"
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO entity_ledger 
+            (name, type, current_state, holder, last_updated_chapter, metadata, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (name, entity_type, state, holder, chapter_num, meta_str))
+        
+        conn.commit()
+        conn.close()
+        print(f"   📒 Ledger Update: [{entity_type}] {name} -> {state} (Holder: {holder})")
+
+    def get_entity_states(self, names: List[str] = None, entity_type: str = None) -> List[Dict]:
+        """获取实体状态账本记录"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        query = "SELECT name, type, current_state, holder, last_updated_chapter, metadata FROM entity_ledger WHERE 1=1"
+        params = []
+        
+        if names:
+            placeholders = ','.join(['?'] * len(names))
+            query += f" AND name IN ({placeholders})"
+            params.extend(names)
+            
+        if entity_type:
+            query += " AND type = ?"
+            params.append(entity_type)
+            
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        results = []
+        import json
+        for r in rows:
+            results.append({
+                "name": r[0],
+                "type": r[1],
+                "state": r[2],
+                "holder": r[3],
+                "last_updated": r[4],
+                "metadata": json.loads(r[5]) if r[5] else {}
+            })
+        return results
+
+    def get_full_ledger_context(self, active_characters: List[str]) -> str:
+        """
+        🔥 P4新增: 为Writer构建账本上下文
+        1. 获取所有相关角色的身体状态
+        2. 获取他们持有的重要物品
+        3. 获取全局重要状态 (Global Flags)
+        """
+        states = []
+        
+        # 1. 角色相关状态 (持有物品、身体状态)
+        # 查询 holder 在 active_characters 里的记录，或者 name 在 active_characters 里的记录 (自身状态)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        placeholders = ','.join(['?'] * len(active_characters)) if active_characters else "''"
+        
+        # 参数: active_characters (for holder) + active_characters (for name)
+        params = active_characters + active_characters if active_characters else []
+        
+        cursor.execute(f'''
+            SELECT name, type, current_state, holder, metadata 
+            FROM entity_ledger 
+            WHERE holder IN ({placeholders}) 
+               OR (name IN ({placeholders}) AND type = 'Character_State')
+               OR type = 'Global_Flag'
+        ''', params)
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        import json
+        
+        char_states = {} # key: char_name
+        inventory = {}   # key: char_name
+        globals = []
+        
+        for row in rows:
+            name, etype, state, holder, meta_raw = row
+            meta = json.loads(meta_raw) if meta_raw else {}
+            
+            desc = f"{name}: {state}"
+            if meta.get("effect"):
+                desc += f" ({meta['effect']})"
+            
+            if etype == 'Global_Flag':
+                globals.append(f"⚠️ [WORLD] {desc}")
+            elif etype == 'Character_State':
+                owner = holder if holder else name
+                if owner not in char_states: char_states[owner] = []
+                char_states[owner].append(desc) 
+            else: # Items, etc.
+                if holder:
+                    if holder not in inventory: inventory[holder] = []
+                    inventory[holder].append(desc)
+                    
+        # 格式化输出
+        lines = []
+        if globals:
+            lines.append("### 🌍 世界规则/状态 (Global Flags)")
+            lines.extend(globals)
+            
+        if char_states or inventory:
+            lines.append("### 🎒 实体状态账本 (Entity Ledger - Must Obey)")
+            all_chars = set(char_states.keys()) | set(inventory.keys())
+            for char in all_chars:
+                items = inventory.get(char, [])
+                states = char_states.get(char, [])
+                
+                segment = f"- **{char}**:"
+                if states:
+                    segment += f" [状态: {', '.join(states)}]"
+                if items:
+                    segment += f" [持有: {'; '.join(items)}]"
+                lines.append(segment)
+                
+        return "\n".join(lines) if lines else ""
 
     # --- 遥测指标 (Narrative Telemetry) ---
 
@@ -609,18 +775,46 @@ class MemoryManager:
 
         return "\n".join(lines)
 
+    def get_style_sample_list(self, tags: List[str] = None, limit: int = 5) -> List[str]:
+        """
+        🔥 P2配套: 获取原始文风样板列表 (供 StyleChecker 分析使用)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        rows = []
+        if tags:
+            placeholders = ','.join(['?'] * len(tags))
+            # 优先取 auto_learned (质量更高)
+            sql = f"""
+                SELECT content FROM style_guide
+                WHERE category IN ({placeholders})
+                ORDER BY CASE WHEN source='auto_learned' THEN 1 ELSE 0 END DESC, quality_score DESC, RANDOM()
+                LIMIT ?
+            """
+            params = list(tags) + [limit]
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+        # 兜底
+        if not rows:
+            cursor.execute("""
+                SELECT content FROM style_guide
+                ORDER BY quality_score DESC, RANDOM()
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+
+        conn.close()
+        return [r[0] for r in rows]
+
     def auto_learn_style_from_chapter(self, chapter_num: int, content: str, metrics: Dict[str, Any]):
         """
-        🔥 P2新增: 自动从高分章节学习文风样板
+        🔥 P2新增 + P5修复: 自动从高分章节学习文风样板
 
-        触发条件:
+        触发条件 (P5 修复版):
         - 该章节的 pacing_score >= 80 且 tension >= 70 (优秀战斗)
-        - 或 thematic_score >= 80 (优秀情感/主题)
-        - 或 character_consistency_score >= 90 (优秀人设)
-
-        提取策略:
-        - 提取该章节的精彩段落 (200-400字)
-        - 自动打标签 (Action/Dialogue/InnerMonologue等)
+        - 且 character_consistency_score >= 85 (🔥 必须保证不 OOC)
         """
         pacing = metrics.get('pacing_score', 0)
         tension = metrics.get('tension', 0)
@@ -631,6 +825,12 @@ class MemoryManager:
         should_learn = False
         categories = []
         quality_score = 0
+
+        # 🔥 P5修复: 增加一致性硬门槛 (Consistency Gate)
+        # 即使节奏再好，如果人设崩了(OOC)，绝对不能学，否则是给系统喂毒
+        if consistency < 85:
+            # print(f"   🛡️ 文风学习被拦截: 一致性过低 ({consistency} < 85)，防止 OOC 污染。")
+            return
 
         if pacing >= 80 and tension >= 70:
             should_learn = True
@@ -643,6 +843,7 @@ class MemoryManager:
             categories.append('Philosophy')
             quality_score = max(quality_score, thematic)
 
+        # 对话类样板要求更高的一致性
         if consistency >= 90:
             should_learn = True
             categories.append('Dialogue')
@@ -708,18 +909,22 @@ class MemoryManager:
         # 2. Vector Storage (Strongly weighted metadata)
         # 格式化内容，强调这是规则
         full_text = f"【世界圣经/绝对规则】[{category}] {topic}: {content}"
-        self.vector_store.add_documents([
-            Document(
-                page_content=full_text, 
-                metadata={
-                    "type": "bible_truth", 
-                    "category": category, 
-                    "topic": topic, 
-                    "entry_id": entry_id,
-                    "status": "active"
-                }
-            )
-        ])
+        try:
+            self.vector_store.add_documents([
+                Document(
+                    page_content=full_text, 
+                    metadata={
+                        "type": "bible_truth", 
+                        "category": category, 
+                        "topic": topic, 
+                        "entry_id": entry_id,
+                        "status": "active"
+                    }
+                )
+            ])
+        except Exception as e:
+            print(f"   ⚠️ Bible Vector Write Failed (Non-fatal): {e}")
+
         print(f"✝️ Bible Entry Added: [{category}] {topic}")
 
     def get_bible_context(self, query: str, active_entities: List[str] = None) -> str:
@@ -1608,7 +1813,10 @@ class MemoryManager:
         conn.close()
         
         full_text = f"[{layer}] {character_name} {event_type}: {description}"
-        self.event_store.add_documents([Document(page_content=full_text, metadata={"event_id": event_id, "chapter": chapter_num, "character": character_name, "type": event_type, "layer": layer, "status": "active"})])
+        try:
+            self.event_store.add_documents([Document(page_content=full_text, metadata={"event_id": event_id, "chapter": chapter_num, "character": character_name, "type": event_type, "layer": layer, "status": "active"})])
+        except Exception as e:
+            print(f"   ⚠️ Event Vector Write Failed (Non-fatal): {e}")
 
         # --- Graph Synchronization ---
         # 仅同步 Reality 层的事件进图谱，避免臆想污染因果链
@@ -1798,14 +2006,52 @@ class MemoryManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         # 🔥 P0修改: 排除待确认的伏笔
-        cursor.execute('''
-            SELECT id, chapter_created, content, importance
-            FROM foreshadowing
-            WHERE status = "active" AND pending_resolution = 0
-        ''')
+        cursor.execute('SELECT id, chapter_created, content, importance FROM foreshadowing WHERE status = "active" AND pending_resolution = 0 ORDER BY importance DESC')
         rows = cursor.fetchall()
         conn.close()
-        return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3] if len(r) > 3 else 5} for r in rows]
+        return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3]} for r in rows]
+
+    # --- 高光时刻管理 (Emotional Highlights) ---
+
+    def save_highlight(self, chapter_num: int, content: str, tags: List[str] = None, sentiment: str = "Neutral"):
+        """
+        🔥 P5新增: 保存高光时刻 (The Emotional Rescue)
+        存入原文片段，而非摘要。
+        """
+        if not content or len(content) < 10: return
+        
+        metadata = {
+            "chapter": chapter_num,
+            "tags": ",".join(tags) if tags else "",
+            "sentiment": sentiment,
+            "type": "highlight"
+        }
+        
+        try:
+            self.highlight_store.add_documents([
+                Document(page_content=content, metadata=metadata)
+            ])
+            print(f"   ✨ Saved Highlight (Ch{chapter_num}): {content[:30]}...")
+        except Exception as e:
+            print(f"   ⚠️ Failed to save highlight: {e}")
+
+    def retrieve_highlights(self, query: str, k: int = 3) -> str:
+        """
+        🔥 P5新增: 检索高光时刻 (用于 Context 注入)
+        """
+        try:
+            results = self.highlight_store.similarity_search(query, k=k)
+            if not results: return ""
+            
+            lines = ["# 🎞️ 闪回记忆 (Emotional Flashbacks - Use These Phrases!)"]
+            for doc in results:
+                chap = doc.metadata.get("chapter", "?")
+                lines.append(f"- [Ch{chap}]: \"{doc.page_content}\"")
+            
+            return "\n".join(lines)
+        except Exception as e:
+            print(f"   ⚠️ Failed to retrieve highlights: {e}")
+            return ""
 
     # --- 地理信息管理 (GIS) ---
 
@@ -1964,189 +2210,159 @@ class MemoryManager:
 
     def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False) -> str:
         """
-        🔥 P0优化版 + P4修复: 分级混合检索 (Tri-Stage Retrieval) with Chapter-Partitioned Search
+        🔥 P0优化版 + P6修复: 分区混合检索 (Partitioned Hybrid Retrieval)
 
-        优化策略:
-        1. 章节分区: 仅检索近期窗口(500章)避免全量扫描
-        2. 全局重要记忆: 并行检索高重要性内容(World Bible/Core Events)
-        3. 时间衰减: Re-ranking提升近期记忆权重
-        4. 🔥 P4新增: 冷启动保护 - 前100章检索质量保障
-
-        性能提升: 200万字场景下从O(n)降至O(log n), 预计10秒→<2秒
+        修复说明:
+        - 移除了旧的 500 章硬窗口限制，解决了长程记忆断裂问题。
+        - 采用 "近期热区(Recent)" + "全局高优(Global)" 双轨检索策略。
+        - 确保早期的伏笔和核心设定(即使在1000章以前)也能被召回。
         """
-        final_docs = {} # id -> Document
+        final_docs = {} # id/content_key -> Document
 
-        # --- Stage 0: 🔥 动态窗口计算 (P0新增) ---
-        recent_window = 500  # 默认窗口: 最近500章
+        # --- 配置参数 ---
+        recent_window_size = 200  # 近期热区窗口 (章)
+        recent_k = k              # 近期检索数量
+        global_k = max(5, k)      # 全局检索数量 (保持较高召回)
 
-        # 🔥 P4新增: 冷启动检测 (前100章特殊处理)
-        is_cold_start = current_chapter is not None and current_chapter <= 100
-        cold_start_similarity_threshold = 0.3  # 冷启动期间的相似度阈值
-
-        # 自适应窗口: 早期小说扩大窗口,后期严格限制
-        if current_chapter is not None:
-            if current_chapter <= 100:
-                recent_window = current_chapter  # 前100章全检索
-            elif current_chapter <= 500:
-                recent_window = 300  # 中期适度扩大
-            # 500+章严格限制在500章窗口
-
-        # --- Stage 1A: 🔥 近期记忆检索 (Partitioned Search) ---
-        candidate_k = k * 2  # 减少候选池(因为分区后精度更高)
-
-        # 🔥 注意: ChromaDB不支持复杂范围查询,改用后处理过滤
-        search_kwargs_recent = {}
+        # 基础过滤
+        base_filter = {}
         if not include_archived:
-            search_kwargs_recent["filter"] = {"status": "active"}
+            base_filter = {"status": "active"}
 
-        # 近期记忆检索 (扩大检索,后过滤)
+        # --- Track 1: 近期热区检索 (High Precision) ---
+        # 目标: 获取最近发生的、细节丰富的情节
         try:
-            # 扩大候选池以补偿过滤损失
-            expanded_k = candidate_k * 3 if current_chapter is not None else candidate_k
-
-            recent_results_raw = self.vector_store.similarity_search_with_relevance_scores(
-                query, k=expanded_k, **search_kwargs_recent
+            recent_results = []
+            # 如果有章节限制，进行软过滤 (因为 Chroma 不支持复杂范围 Filter，这里做两步走)
+            # 策略: 检索更多，然后 Python 过滤
+            
+            # 构造 Filter: 必须是 Active
+            recent_search_kwargs = {"filter": base_filter} if base_filter else {}
+            
+            raw_recent = self.vector_store.similarity_search_with_relevance_scores(
+                query, k=recent_k * 3, **recent_search_kwargs
             )
 
-            # 🔥 后处理: Python层过滤章节范围
             if current_chapter is not None:
-                chapter_min = max(1, current_chapter - recent_window)
-                recent_results = []
-                for doc, score in recent_results_raw:
-                    doc_chapter = doc.metadata.get("chapter")
-                    # 保留: 1)无章节信息(如World Bible) 2)在窗口内
-                    if doc_chapter is None or (chapter_min <= int(doc_chapter) <= current_chapter):
+                min_chap = max(1, current_chapter - recent_window_size)
+                for doc, score in raw_recent:
+                    doc_chap = doc.metadata.get("chapter")
+                    # 保留: 1) 无章节(通用设定) 2) 在近期窗口内
+                    if doc_chap is None or (self._try_parse_int(doc_chap) >= min_chap):
                         recent_results.append((doc, score))
-                        if len(recent_results) >= candidate_k:
+                        if len(recent_results) >= recent_k:
                             break
             else:
-                recent_results = recent_results_raw[:candidate_k]
+                recent_results = raw_recent[:recent_k]
+                
+            # 标记来源
+            for doc, score in recent_results:
+                doc.metadata["retrieval_source"] = "Recent"
+                doc.metadata["raw_score"] = score
+                self._add_to_final(final_docs, doc, score)
 
         except Exception as e:
-            print(f"   ⚠️ 向量检索警告: {e}, 回退到无过滤模式")
-            recent_results = self.vector_store.similarity_search(query, k=candidate_k)
-            recent_results = [(doc, 0.8) for doc in recent_results]
+            print(f"   ⚠️ 近期检索失败: {e}")
 
-        # --- Stage 1B: 🔥 全局重要记忆检索 (Global High-Priority) ---
-        # 并行检索不受时间限制的核心内容
-        search_kwargs_global = {}
-        if not include_archived:
-            search_kwargs_global["filter"] = {"status": "active"}
-
+        # --- Track 2: 全局高优检索 (High Recall / Long-term Memory) ---
+        # 目标: 召回早期的伏笔、核心设定、世界圣经
+        # 策略: 不限制章节，但可能通过 Metadata 偏向重要内容
         try:
-            global_results_raw = self.vector_store.similarity_search_with_relevance_scores(
-                query, k=max(5, k), **search_kwargs_global
+            # 这里的 Filter 应该更宽泛，或者针对 'type' 进行过滤? 
+            # 实际上，全文检索通常能找到最好的。我们主要依靠 Score 和 Importance 加权。
+            
+            global_search_kwargs = {"filter": base_filter} if base_filter else {}
+            
+            raw_global = self.vector_store.similarity_search_with_relevance_scores(
+                query, k=global_k, **global_search_kwargs
             )
-            # 后处理: 过滤高优先级类型
-            global_results = [
-                (doc, score) for doc, score in global_results_raw
-                if doc.metadata.get("type") in ["bible_truth", "world_setting"]
-                or doc.metadata.get("importance", 0) >= 8
-            ][:max(3, k // 2)]
-        except Exception:
-            global_results = []  # 失败不影响主流程
 
-        # 合并结果
-        semantic_results = recent_results + global_results
+            for doc, score in raw_global:
+                # 过滤: 如果已经在 Recent 中找到，跳过 (由 _add_to_final 处理)
+                # 加权: 如果是 Bible 或 High Importance，分数加成
+                
+                doc_type = doc.metadata.get("type", "unknown")
+                importance = doc.metadata.get("importance", 5)
+                
+                boost = 1.0
+                if doc_type in ["bible_truth", "world_setting", "character_core"]:
+                    boost = 1.2  # 圣经/设定加权
+                elif importance >= 8:
+                    boost = 1.15 # 核心伏笔加权
 
-        # 🔥 P4新增: 冷启动保护 - 过滤低质量检索结果
-        if is_cold_start:
-            filtered_results = []
-            for doc, score in semantic_results:
-                # 冷启动期间只保留高相似度或高优先级结果
-                doc_type = doc.metadata.get("type", "")
-                is_high_priority = doc_type in ["bible_truth", "world_setting", "character_core"]
-                is_high_similarity = score >= cold_start_similarity_threshold
+                final_score = score * boost
+                
+                doc.metadata["retrieval_source"] = "Global"
+                doc.metadata["raw_score"] = score
+                self._add_to_final(final_docs, doc, final_score)
 
-                if is_high_priority or is_high_similarity:
-                    filtered_results.append((doc, score))
-                else:
-                    # 低相似度结果降权但不完全丢弃
-                    if score >= 0.2:
-                        filtered_results.append((doc, score * 0.5))
+        except Exception as e:
+            print(f"   ⚠️ 全局检索失败: {e}")
 
-            semantic_results = filtered_results
-            if len(semantic_results) < k // 2:
-                print(f"   ⚠️ 冷启动警告: 向量检索数据稀疏(仅{len(semantic_results)}条有效结果)")
-
-        for doc, score in semantic_results:
-            # Calculate Time Decay
-            decay_factor = 1.0
-            if current_chapter is not None and "chapter" in doc.metadata:
-                try:
-                    event_chapter = int(doc.metadata["chapter"])
-                    # 豁免规则: World Bible / Settings 不衰减
-                    doc_type = doc.metadata.get("type", "")
-                    if doc_type in ["bible_truth", "rule", "world_setting"]:
-                        decay_factor = 1.0
-                    else:
-                        delta = max(0, current_chapter - event_chapter)
-                        # Formula: (1 / (delta + 1)) ^ 0.25
-                        # Delta 10 -> 0.56, Delta 100 -> 0.31
-                        alpha = 0.25
-                        decay_factor = (1 / (delta + 1)) ** alpha
-                except:
-                    decay_factor = 1.0
-            
-            # Apply Decay
-            final_score = score * decay_factor
-            
-            # Store with updated score
-            # 使用内容前缀作为去重 Key (简单有效)
-            key = doc.page_content[:50]
-            doc.metadata["retrieval_source"] = "Semantic"
-            doc.metadata["final_score"] = final_score
-            doc.metadata["original_score"] = score
-            
-            # Keep if better
-            if key not in final_docs or final_docs[key].metadata["final_score"] < final_score:
-                final_docs[key] = doc
-
-        # --- Stage 2: 实体与伏笔关联检索 ---
-        # 使用语义实体提取，而非正则匹配
+        # --- Track 3: 实体关联伏笔 (Entity Hooks) ---
+        # 显式查找相关实体的未回收伏笔
         keywords = self._extract_entities_semantically(query)
         if keywords:
-            # 2a. 检查是否有相关联的未回收伏笔
             active_hooks = self.get_active_foreshadowing()
             for hook in active_hooks:
-                # 如果伏笔内容包含当前 query 中的关键词
+                # 简单匹配: 伏笔内容包含 query 关键词
                 for kw in keywords:
                     if kw in hook['content']:
-                        # 构造一个虚拟 Document
                         doc = Document(
                             page_content=f"【未回收伏笔】(ID:{hook['id']}) {hook['content']}",
                             metadata={
                                 "chapter": hook['chapter'], 
                                 "type": "foreshadowing", 
                                 "retrieval_source": "HookMatch",
-                                "final_score": 2.0 # Give it super high score
+                                "importance": hook['importance']
                             }
                         )
-                        final_docs[f"hook_{hook['id']}"] = doc
-        
-        # --- Stage 3: 结果整合与格式化 ---
-        # Sort by final_score
+                        # 伏笔给予极高分数，确保置顶
+                        self._add_to_final(final_docs, doc, 2.0)
+
+        # --- 结果整合 ---
+        # 排序: 分数降序
         sorted_docs = sorted(
             final_docs.values(), 
-            key=lambda x: (
-                0 if x.metadata.get("retrieval_source") == "HookMatch" else 1,
-                -x.metadata.get("final_score", 0)
-            )
+            key=lambda x: -x.metadata.get("final_score", 0)
         )
         
-        # Trim to original k
+        # 截断
         sorted_docs = sorted_docs[:k]
 
         if not sorted_docs: return "暂无相关记忆。"
 
         lines = []
         for i, doc in enumerate(sorted_docs):
-            source_tag = "⚡️" if doc.metadata.get("retrieval_source") == "Semantic" else "🔗"
+            source = doc.metadata.get("retrieval_source", "?")
             chapter = doc.metadata.get("chapter", "?")
-            # debug_score = f"(S:{doc.metadata.get('final_score', 0):.2f})"
-            lines.append(f"--- 记忆片段 {i+1} [{source_tag} 第 {chapter} 章] ---\n{doc.page_content}\n")
+            tag_map = {"Recent": "⚡️", "Global": "🌍", "HookMatch": "🔗"}
+            tag = tag_map.get(source, "📄")
+            
+            # debug_info = f" (S:{doc.metadata.get('final_score', 0):.2f})"
+            lines.append(f"--- 记忆片段 {i+1} [{tag} 第 {chapter} 章] ---\n{doc.page_content}\n")
             
         return "\n".join(lines)
+
+    def _add_to_final(self, final_docs: Dict, doc: Document, score: float):
+        """辅助函数: 去重并保留高分版本"""
+        # 使用内容前50字符作为去重Key
+        key = doc.page_content[:50]
+        
+        doc.metadata["final_score"] = score
+        
+        if key not in final_docs:
+            final_docs[key] = doc
+        else:
+            # 如果已存在，保留分数高的那个
+            if score > final_docs[key].metadata["final_score"]:
+                final_docs[key] = doc
+
+    def _try_parse_int(self, value):
+        try:
+            return int(value)
+        except:
+            return -1
 
     def similarity_search(self, query: str, k: int = 3) -> List[Document]:
         return self.vector_store.similarity_search(query, k=k)

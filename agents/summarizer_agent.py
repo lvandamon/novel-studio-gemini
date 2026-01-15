@@ -343,7 +343,40 @@ class SummarizerAgent:
         return "\n".join(buffer)
 
     def generate_summary(self, content: str, chapter_num: int) -> str:
-        """(Legacy) 单章摘要生成，保留以备不时之需"""
-        summary = self.chain.invoke({"content": content})
-        self.memory.update_chapter_summary(chapter_num, summary)
-        return summary
+        """
+        🔥 P5升级: 生成摘要并提取高光时刻 (JSON Pipeline)
+        """
+        from core.json_repair import clean_json
+        import json
+
+        try:
+            response = self.chain.invoke({"content": content})
+            cleaned = clean_json(response)
+            data = json.loads(cleaned)
+            
+            # 1. 存储摘要 (Dry Logic)
+            summary_text = data.get("summary", "暂无摘要")
+            self.memory.update_chapter_summary(chapter_num, summary_text)
+            
+            # 2. 存储高光 (Wet Emotion)
+            highlights = data.get("highlights", [])
+            for h in highlights:
+                self.memory.save_highlight(
+                    chapter_num=chapter_num,
+                    content=h.get("content", ""),
+                    tags=h.get("tags", []),
+                    sentiment=h.get("sentiment", "Neutral")
+                )
+            
+            print(f"   📝 Summary Generated (Ch{chapter_num}): {len(summary_text)} chars")
+            print(f"   ✨ Highlights Saved: {len(highlights)} fragments")
+            
+            return summary_text
+            
+        except Exception as e:
+            print(f"   ⚠️ Summary Generation Failed (Fallback to raw): {e}")
+            # Fallback: Treat raw response as summary if JSON fails completely
+            # But usually clean_json handles most cases.
+            raw_summary = str(response)[:500]
+            self.memory.update_chapter_summary(chapter_num, raw_summary)
+            return raw_summary

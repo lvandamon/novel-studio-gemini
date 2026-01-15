@@ -20,7 +20,9 @@ def get_deepseek_chat(temperature: float = 0.7) -> ChatOpenAI:
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
-        streaming=True
+        streaming=True,
+        max_retries=3,
+        request_timeout=120
     )
 
 def get_deepseek_reasoner() -> ChatOpenAI:
@@ -38,5 +40,7 @@ def get_deepseek_reasoner() -> ChatOpenAI:
         base_url=DEEPSEEK_BASE_URL,
         # R1 推荐 temperature 为 0 以保证逻辑严密性。
         temperature=0.0, 
-        streaming=True
+        streaming=True,
+        max_retries=3,
+        request_timeout=300 # R1 needs more time to think
     )

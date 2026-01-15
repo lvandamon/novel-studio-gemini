@@ -376,6 +376,7 @@ class GraphManager:
         SET e.description = $desc,
             e.chapter = $chapter,
             e.type = $type,
+            e.status = COALESCE(e.status, 'Active'), // 🔥 P4新增: 默认为活跃状态
             e.updated_at = timestamp()
         """
         with self.driver.session() as session:
@@ -411,7 +412,7 @@ class GraphManager:
             session.run(query, char_name=character_name, event_uid=str(event_uid), role=role)
 
     @retry_neo4j()
-    def query_causal_chain(self, event_uid: str, depth: int = 3, include_core_events: bool = True) -> str:
+    def query_causal_chain(self, event_uid: str, depth: int = 3, include_core_events: bool = True, include_archived: bool = False) -> str:
         """
         🔥 P1升级: 反向追溯增强版
 
@@ -420,11 +421,19 @@ class GraphManager:
         2. 追溯下游影响
         3. 包含参与角色
         4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
+        5. 🔥 P4升级: 支持图谱剪枝 (Graph Pruning)，默认过滤归档事件
         """
         if not self.is_connected():
             # 🔥 P3修复: 使用SQL降级查询
             print("   ⚠️ Neo4j不可用，启用SQL降级因果查询...")
             return self._fallback_query_causal_chain(event_uid, depth)
+
+        # Status filter
+        status_clause = "WHERE (cause.status IS NULL OR cause.status = 'Active')"
+        effect_status_clause = "WHERE (effect.status IS NULL OR effect.status = 'Active')"
+        if include_archived:
+            status_clause = "" 
+            effect_status_clause = ""
 
         # 计算动态深度: 核心事件允许更深追溯
         actual_depth = depth
@@ -443,6 +452,7 @@ class GraphManager:
         # 查询导致该事件的上游事件 (Ancestors)
         ancestor_query = f"""
         MATCH p = (root:Event {{uid: $uid}})<-[:CAUSED*1..{actual_depth}]-(cause:Event)
+        {status_clause}
         OPTIONAL MATCH (c:Character)-[:PARTICIPATED_IN]->(cause)
         RETURN cause.uid as uid, cause.chapter as chap, cause.description as desc,
                cause.type as type, length(p) as dist, collect(c.name) as participants
@@ -462,6 +472,7 @@ class GraphManager:
         # 🔥 P1新增: 查询下游影响 (Descendants)
         descendant_query = f"""
         MATCH p = (root:Event {{uid: $uid}})-[:CAUSED*1..{min(actual_depth, 5)}]->(effect:Event)
+        {effect_status_clause}
         OPTIONAL MATCH (c:Character)-[:PARTICIPATED_IN]->(effect)
         RETURN effect.chapter as chap, effect.description as desc,
                effect.type as type, length(p) as dist, collect(c.name) as participants
@@ -509,6 +520,23 @@ class GraphManager:
         """
         with self.driver.session() as session:
             session.run(query, uid=str(event_uid), type=event_type)
+
+    @retry_neo4j()
+    def archive_event(self, event_uid: str):
+        """
+        🔥 P4新增: 归档事件 (剪枝)
+        将事件标记为 'Archived'，使其不再出现在常规因果检索中。
+        """
+        if not self.is_connected():
+            return
+            
+        query = """
+        MATCH (e:Event {uid: $uid})
+        SET e.status = 'Archived', e.archived_at = timestamp()
+        """
+        with self.driver.session() as session:
+            session.run(query, uid=str(event_uid))
+        print(f"   🗂️ Event Archived: {event_uid}")
 
     def _logical_delete_relationship(self, source: str, relation_label: str, target: str, chapter_num: int):
         """逻辑删除：设置 end_chapter"""
@@ -761,3 +789,51 @@ class GraphManager:
                 edges.append({"from": s_name, "to": t_name, "label": rel, "arrows": "to"})
                 
         return {"nodes": list(nodes.values()), "edges": edges}
+
+    @retry_neo4j()
+    def get_unresolved_conflicts(self, limit: int = 10) -> str:
+        """
+        🔥 P5新增: 获取未闭环冲突 (Director's Eye)
+        查询所有仍然活跃的负面关系 (ENEMY_OF, HATES, RIVAL_OF, BETRAYED)。
+        这些是剧情的驱动力。
+        """
+        if not self.is_connected():
+            # SQL Fallback (Simple)
+            try:
+                conn = self._get_sql_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT source_name, relation, target_name, description 
+                    FROM relationship_backup
+                    WHERE relation IN ('ENEMY_OF', 'HATES', 'RIVAL_OF', 'BETRAYED')
+                      AND end_chapter IS NULL
+                    LIMIT ?
+                ''', (limit,))
+                rows = cursor.fetchall()
+                conn.close()
+                if not rows: return "无活跃冲突记录 (SQL)。"
+                return "\n".join([f"- {r[0]} {r[1]} {r[2]} ({r[3] or ''})" for r in rows])
+            except Exception as e:
+                return f"冲突查询失败: {e}"
+
+        query = """
+        MATCH (a)-[r]->(b)
+        WHERE type(r) IN ['ENEMY_OF', 'HATES', 'RIVAL_OF', 'BETRAYED', 'KILLED_FAMILY_OF']
+          AND r.end_chapter IS NULL
+        RETURN a.name as source, type(r) as rel, b.name as target, r.desc as desc, r.start_chapter as start_ch
+        ORDER BY r.start_chapter ASC
+        LIMIT $limit
+        """
+        
+        lines = []
+        with self.driver.session() as session:
+            result = session.run(query, limit=limit)
+            for record in result:
+                desc = f" ({record['desc']})" if record['desc'] else ""
+                start_ch = f" [Since Ch{record['start_ch']}]" if record['start_ch'] else ""
+                lines.append(f"- ⚔️ {record['source']} --[{record['rel']}]--> {record['target']}{desc}{start_ch}")
+                
+        if not lines:
+            return "当前无活跃的致命冲突 (Peaceful... for now)。"
+            
+        return "\n".join(lines)
