@@ -2,6 +2,7 @@ import sqlite3
 import json
 from typing import Dict, Any, List, Optional
 from core.memory import MemoryManager
+from agents.retcon_agent import RetconAgent
 
 class GodMode:
     """
@@ -11,9 +12,32 @@ class GodMode:
     def __init__(self, memory_manager: MemoryManager):
         self.memory = memory_manager
         self.db_path = memory_manager.db_path
+        self.retcon_agent = RetconAgent(memory_manager) # 🔥 Init Retcon Agent
 
     def _get_connection(self):
         return sqlite3.connect(self.db_path)
+
+    def retcon_history(self, instruction: str, dry_run: bool = False) -> List[str]:
+        """
+        🔥 执行历史修正 (Retcon)
+        """
+        print(f"⚡️ GodMode: Initiating Retcon Sequence -> {instruction}")
+        plan = self.retcon_agent.analyze_retcon(instruction)
+        
+        if "error" in plan:
+            print(f"❌ Retcon Analysis Failed: {plan['error']}")
+            return [f"Error: {plan['error']}"]
+            
+        print("📋 Retcon Plan Generated:")
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        
+        if dry_run:
+            print("🛑 Dry Run: No changes applied.")
+            return ["Dry Run Complete"]
+            
+        logs = self.retcon_agent.execute_retcon(plan)
+        print("✅ Retcon Execution Complete.")
+        return logs
 
     def get_character_data(self, name: str) -> Optional[Dict[str, Any]]:
         conn = self._get_connection()
