@@ -1,0 +1,23 @@
+{
+  "general": {
+    "previewFeatures": true,
+    "enablePromptCompletion": true
+  },
+  "ui": {
+    "footer": {
+      "hideContextPercentage": false
+    },
+    "showMemoryUsage": true,
+    "showCitations": true,
+    "showModelInfoInChat": true
+  },
+  "ide": {
+    "enabled": true
+  },
+  "experimental": {
+    "skills": true,
+    "codebaseInvestigatorSettings": {
+      "maxNumTurns": 20
+    }
+  }
+}
