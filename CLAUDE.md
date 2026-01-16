@@ -11,7 +11,7 @@ Novel Studio Gemini is an AI-assisted creative writing system for ultra-long Chi
 - **LLMs**: DeepSeek-R1 (reasoning) + DeepSeek-V3 (writing)
 - **Orchestration**: LangGraph
 - **Storage**: ChromaDB (vectors) + SQLite (structured) + Neo4j (graph)
-- **UI**: Streamlit (dashboard) + cmd.Cmd (CLI)
+- **UI**: React (Frontend) + FastAPI (Backend) + cmd.Cmd (CLI)
 - **Embeddings**: SentenceTransformers (all-MiniLM-L6-v2)
 
 ## Quick Commands
@@ -24,11 +24,14 @@ uv sync
 uv run python utils/init_world_v2.py
 uv run python utils/init_style.py
 
-# Run CLI
-uv run python main.py
+# Run Backend API
+cd backend && uv run uvicorn api.main:app --reload
 
-# Run Streamlit dashboard
-uv run streamlit run app.py
+# Run Frontend
+cd frontend && npm run dev
+
+# Run CLI
+cd backend && uv run python main.py
 
 # Run tests
 pytest tests/

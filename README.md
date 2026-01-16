@@ -70,9 +70,17 @@
     uv run python utils/init_style.py
     ```
 
-2.  **启动 Streamlit UI**:
+2.  **启动后端服务**:
     ```bash
-    uv run streamlit run app.py
+    cd backend
+    uv run uvicorn api.main:app --reload
+    ```
+
+3.  **启动前端界面**:
+    ```bash
+    cd frontend
+    npm install
+    npm run dev
     ```
 
 ---
@@ -100,9 +108,13 @@
 
 ```text
 .
-├── app.py              # Streamlit 交互界面 (主入口)
-├── agents/             # 专家智能体 (Writer, Editor, Director, etc.)
-├── core/               # 核心大脑 (Workflow, Memory, Context Manager)
+├── frontend/           # React 交互界面 (主入口)
+├── backend/            # Python 后端
+│   ├── main.py         # CLI 入口
+│   ├── api/            # FastAPI 服务
+│   ├── agents/         # 专家智能体
+│   ├── core/           # 核心大脑
+│   └── ...
 ├── data/               # 数据库文件 (Vector Store, SQLite)
 ├── utils/              # 初始化与实用工具
 ├── tests/              # 自动化测试套件

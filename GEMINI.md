@@ -28,8 +28,12 @@
 ## Project Structure
 ```text
 .
-├── app.py              # Streamlit 交互界面
-├── core/               # 核心大脑
+├── frontend/           # React 交互界面
+├── backend/            # Python 后端
+│   ├── main.py         # CLI 入口
+│   ├── api/            # FastAPI 服务
+│   │   └── main.py     # API 入口
+│   ├── core/           # 核心大脑
 │   ├── workflow.py     # LangGraph 状态机定义
 │   ├── context_manager.py # 分层级上下文构建 (意图驱动)
 │   ├── memory.py       # 混合数据库适配器 (SQLite + Chroma)
@@ -52,7 +56,7 @@
 - [x] **Phase 2: Core Agents:** 实装 Writer, Editor, Director。完成 Director 遥测闭环。
 - [x] **Phase 3: Context & Style:** 实装意图驱动上下文管理器，黄金锚点与文风样板库。
 - [ ] **Phase 4: Advanced Graph:** 强化 Neo4j 因果链追溯，实装“蝴蝶效应”分析。
-- [ ] **Phase 5: UI & Scale:** Streamlit 交互界面优化，进行 10 万字压力连贯性测试。
+- [ ] **Phase 5: UI & Scale:** React 交互界面优化，进行 10 万字压力连贯性测试。
 
 ## Quick Start
 ```bash
