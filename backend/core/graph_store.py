@@ -1038,9 +1038,9 @@ class GraphManager:
         return "未发现直接联系。"
 
     @retry_neo4j()
-    def get_multi_entity_relationships(self, entities: List[str], max_depth: int = 2, current_chapter: int = None, recent_window: int = 500) -> str:
+    def get_multi_entity_relationships(self, entities: List[str], max_depth: int = 2, current_chapter: int = None, recent_window: int = 500, pov_character: str = None) -> str:
         """
-        🔥 P0优化版: 多实体关系提取 (带时间窗口+提前终止+状态过滤)
+        🔥 P0优化版: 多实体关系提取 (带时间窗口+提前终止+状态过滤+迷雾系统)
 
         优化策略:
         1. 时间窗口: 仅查询近期建立的关系
@@ -1048,8 +1048,7 @@ class GraphManager:
         3. 结果限制: 严格限制路径数量
         4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
         5. 🔥 P8优化: 过滤 Archived 节点
-
-        性能提升: 复杂场景从>30秒→<5秒
+        6. 🔥 P12新增: 迷雾系统 (Fog of War) - 仅检索 POV 视角可见的关系
         """
         if not self.is_connected():
             # 🔥 P3修复: 使用SQL降级查询
@@ -1060,7 +1059,7 @@ class GraphManager:
             return self.query_entity_context(entities[0], current_chapter=current_chapter or 999999) if entities else ""
 
         # 🔥 快速检查: 超过5个实体时降级为单独查询(避免组合爆炸)
-        if len(entities) > 5:
+        if len(entities) > 5 and not pov_character:
             print(f"   ⚠️ 实体数过多({len(entities)}), 降级为直接关系查询")
             lines = []
             for entity in entities[:3]:  # 只查前3个
@@ -1082,21 +1081,44 @@ class GraphManager:
             AND ALL(n IN nodes(p) WHERE n.status IS NULL OR n.status = 'Active')
             """
 
-        query = f"""
-        MATCH (n) WHERE n.name IN $names
-        MATCH (m) WHERE m.name IN $names AND id(n) < id(m)
-        MATCH p = allShortestPaths((n)-[*..{max_depth}]-(m))
-        {time_filter}
-        RETURN p
-        LIMIT 15
-        """
+        # 🔥 P12: Fog of War Logic
+        if pov_character:
+            # POV 模式: 只查询从 POV 出发能到达其他实体的路径
+            # 这模拟了"POV角色眼中的关系网"
+            # 注意: 这里假设如果 POV 认识 A，且 A 认识 B，那么 POV "可能" 知道 A-B 关系。
+            # 更严格的迷雾需要 Metadata (known_by)，这里暂时用拓扑距离代替。
+            others = [e for e in entities if e != pov_character]
+            if not others:
+                return self.query_entity_context(pov_character, current_chapter=current_chapter or 999999)
+
+            query = f"""
+            MATCH (pov:Character {{name: $pov_name}})
+            MATCH (target) WHERE target.name IN $others
+            MATCH p = allShortestPaths((pov)-[*..{max_depth}]-(target))
+            {time_filter}
+            RETURN p
+            LIMIT 15
+            """
+            params = {"pov_name": pov_character, "others": others}
+            
+        else:
+            # 上帝模式: 查询集合内任意两点的最短路径
+            query = f"""
+            MATCH (n) WHERE n.name IN $names
+            MATCH (m) WHERE m.name IN $names AND id(n) < id(m)
+            MATCH p = allShortestPaths((n)-[*..{max_depth}]-(m))
+            {time_filter}
+            RETURN p
+            LIMIT 15
+            """
+            params = {"names": entities}
 
         paths_found = set()
 
         try:
             with self.driver.session() as session:
                 # 🔥 设置查询超时(5秒)
-                result = session.run(query, names=entities, timeout=5.0)
+                result = session.run(query, **params, timeout=5.0)
                 for record in result:
                     path = record["p"]
                     nodes = [n.get("name") for n in path.nodes]
@@ -1123,7 +1145,8 @@ class GraphManager:
         if not paths_found:
             return "（主要角色之间暂无近期历史关联）"
 
-        return "# 🕸️ 深度关系网 (Deep Connections - 近期)\n" + "\n".join(sorted(list(paths_found)))
+        title = f"# 🕸️ {pov_character} 视角的已知关系 (POV Knowledge)" if pov_character else "# 🕸️ 全局深度关系网 (God's Eye)"
+        return f"{title}\n" + "\n".join(sorted(list(paths_found)))
 
     @retry_neo4j()
     def get_visualization_data(self, limit: int = 100) -> Dict[str, List[Dict]]:

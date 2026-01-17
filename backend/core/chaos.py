@@ -1,100 +1,132 @@
 import random
+import json
 from typing import Optional, Dict
 from core.memory import MemoryManager
+from core.llm import get_deepseek_chat
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from core.json_repair import clean_json
 
 class ChaosEngine:
     """
-    熵增引擎 v2.0 (With Cooldown & Tension Awareness)
+    熵增引擎 v3.0 (Generative Chaos)
     
-    不再是瞎掷骰子，而是一个有节奏的“意外生成器”。
+    不再是查表，而是根据当前语境生成独特的意外。
     """
     
     def __init__(self, memory_manager: MemoryManager, base_probability: float = 0.15):
         self.memory = memory_manager
         self.base_probability = base_probability
+        self.llm = get_deepseek_chat(temperature=0.7) # High temp for creativity
         
         # 定义各类别的冷却时间 (章数)
-        # 越严重的灾难，冷却时间越长
         self.cooldown_rules = {
-            "Environment": 15,  # 天灾不常有
-            "Character": 10,    # 背叛不能太频繁
-            "Information": 5,   # 信息反转可以稍多点
-            "Enemy": 8          # 乱入适中
+            "Environment": 15,
+            "Character": 10,
+            "Information": 5,
+            "Enemy": 8,
+            "Item": 8
         }
         
-        self.chaos_deck = {
-            "Environment": [
-                "突发天灾 (暴雨/地震/兽潮)",
-                "灵气/魔力环境突变 (失效/暴走)",
-                "场景崩塌/地形改变"
-            ],
-            "Character": [
-                "盟友突然背叛/反水",
-                "关键角色旧伤复发/中毒",
-                "路人角色意外介入打乱计划",
-                "主角核心装备/能力暂时失效"
-            ],
-            "Information": [
-                "关键情报被证明是错误的",
-                "绝密计划被敌人提前知晓",
-                "意外得知一个颠覆性的秘密"
-            ],
-            "Enemy": [
-                "第三方势力乱入 (渔翁得利)",
-                "宿敌提前登场 (战力碾压)",
-                "小怪突然变异/狂暴"
-            ]
-        }
+        # Generation Prompt
+        self.gen_prompt = ChatPromptTemplate.from_messages([
+            ("system", """你是一个【戏剧性意外生成器 (Chaos Generator)】。
+你的任务是根据当前剧情上下文，设计一个突发的、合理的、能打破平衡的意外事件。
+
+原则：
+1. **情境相关**：如果地点在火山，不要生成水灾；如果地点在密室，不要生成天降陨石。
+2. **意料之外，情理之中**：意外必须符合世界观逻辑。
+3. **破坏平衡**：意外必须迫使主角改变当前的行动计划。
+
+类别定义：
+- **Environment**: 天气、地形、灵气环境突变。
+- **Character**: 盟友背叛、路人乱入、旧伤复发、走火入魔。
+- **Information**: 发现情报是假的、得知惊天秘密。
+- **Enemy**: 第三方势力介入、宿敌提前登场。
+- **Item**: 关键道具损坏、遗失、或突然觉醒。
+
+输出 JSON (严禁 Markdown):
+{{
+    "category": "Environment" | "Character" | "Information" | "Enemy" | "Item",
+    "description": "一句话描述这个意外",
+    "impact": "对主角造成的直接困扰",
+    "cooldown_cost": 10 // 冷却章数建议
+}}
+"""),
+            ("user", """
+【当前地点】：{location}
+【在场角色】：{characters}
+【当前气氛】：{atmosphere}
+【核心冲突】：{conflict}
+
+请生成一个高戏剧性的意外。不要生成以下冷却中的类别：{frozen_categories}
+""")
+        ])
+        
+        self.chain = self.gen_prompt | self.llm | StrOutputParser()
 
     def roll_for_chaos(self, current_chapter: int, current_tension: float) -> Optional[Dict[str, str]]:
         """
         根据当前章数和紧张度，决定是否触发意外。
         """
         
-        # 1. 检查冷却池 (Global Cooldown Check)
+        # 1. 检查冷却池
         frozen_categories = self.memory.get_active_cooldowns(current_chapter)
-        available_categories = [cat for cat in self.chaos_deck.keys() if cat not in frozen_categories]
+        # Note: In generative mode, we pass frozen cats to LLM as constraint, 
+        # instead of filtering a static list.
         
-        if not available_categories:
-            # 所有灾难都在冷却中，天下太平
-            return None
-
-        # 2. 动态概率调整 (Dynamic Probability based on Tension)
-        # Tension (0.0 - 1.0)
-        # 逻辑：
-        # - Tension > 0.8 (高潮期): 降低干扰概率，让读者专注于当前的高潮，除非是"Mechanic Failure"
-        # - Tension < 0.3 (平淡期): 大幅提升概率，"起风了"
-        
+        # 2. 动态概率调整
         probability = self.base_probability
         
         if current_tension > 0.8:
-            probability *= 0.2 # 极大幅度降低，高潮不容打断
-            # print(f"   🛡️ 高潮保护机制启动 (Tension={current_tension}), 意外概率降至 {probability:.2f}")
+            probability *= 0.2 # 高潮期保护
         elif current_tension < 0.3:
-            probability *= 2.5 # 提升，以此打破沉闷
-            # print(f"   🔥 剧情催化机制启动 (Tension={current_tension}), 意外概率升至 {probability:.2f}")
-        else:
-            # 中间态，微调
-            pass
-
+            probability *= 2.5 # 平淡期催化
+        
         # 3. 掷骰子
         if random.random() < probability:
-            return self._trigger_event(available_categories, current_chapter)
+            return self._generate_event(current_chapter, frozen_categories)
             
         return None
 
-    def _trigger_event(self, available_categories: list, current_chapter: int) -> Dict[str, str]:
-        # 随机抽取一个可用的类别
-        category = random.choice(available_categories)
-        event_desc = random.choice(self.chaos_deck[category])
+    def _generate_event(self, current_chapter: int, frozen_categories: list) -> Dict[str, str]:
+        # Gather Context
+        plan = self.memory.get_active_plan()
+        focus = self.memory.get_narrative_focus()
         
-        # 设定冷却
-        duration = self.cooldown_rules.get(category, 10)
-        self.memory.set_chaos_cooldown(category, current_chapter, duration)
+        # Get active chars from last updated (approximate)
+        # Ideally passed from Director, but here we query DB
+        # For simplicity, we assume generic context or query recent
         
-        return {
-            "type": "Chaos Event",
-            "category": category,
-            "description": event_desc,
-            "instruction": f"Chaos triggered! You MUST integrate this event. Next similar event is frozen for {duration} chapters."
-        }
+        try:
+            # Simple context gathering
+            location = "未知区域"
+            characters = "主角团队"
+            
+            response = self.chain.invoke({
+                "location": location,
+                "characters": characters,
+                "atmosphere": f"Tension: Unknown",
+                "conflict": focus.get('conflict', 'Unknown'),
+                "frozen_categories": ", ".join(frozen_categories)
+            })
+            
+            data = json.loads(clean_json(response))
+            category = data.get("category", "Environment")
+            
+            # Apply cooldown
+            duration = self.cooldown_rules.get(category, 10)
+            self.memory.set_chaos_cooldown(category, current_chapter, duration)
+            
+            print(f"   🎲 Chaos Generated: [{category}] {data['description']}")
+            
+            return {
+                "type": "Chaos Event",
+                "category": category,
+                "description": data['description'],
+                "instruction": f"Chaos triggered! Impact: {data.get('impact')}. You MUST integrate this event immediately."
+            }
+            
+        except Exception as e:
+            print(f"   ⚠️ Chaos Generation Failed: {e}")
+            return None

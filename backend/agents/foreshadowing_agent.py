@@ -12,6 +12,43 @@ class ForeshadowingAgent:
         self.chain = FORESHADOWING_ANALYSIS_PROMPT | self.llm | StrOutputParser()
         self.memory = memory_manager
 
+    def get_stale_unresolved_hooks(self, current_chapter: int, threshold: int = 50, limit: int = 3) -> List[Dict]:
+        """
+        🔥 P6新增: 获取陈旧且未解决的伏笔 (Long-range Hook Retrieval)
+        供 Director 强制唤醒。
+        """
+        import sqlite3
+        conn = sqlite3.connect(self.memory.db_path)
+        cursor = conn.cursor()
+        
+        # 只关注 Subplot(4) 以上的伏笔，Flavor(1-3) 没必要强制回收
+        cutoff_chapter = current_chapter - threshold
+        
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance 
+            FROM foreshadowing 
+            WHERE status = 'active' 
+              AND chapter_created <= ? 
+              AND importance >= 4
+            ORDER BY importance DESC, chapter_created ASC
+            LIMIT ?
+        ''', (cutoff_chapter, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        stale_hooks = []
+        for r in rows:
+            stale_hooks.append({
+                "id": r[0],
+                "chapter_created": r[1],
+                "content": r[2],
+                "importance": r[3],
+                "gap": current_chapter - r[1]
+            })
+            
+        return stale_hooks
+
     def check_hook_health(self, current_chapter: int) -> List[Dict]:
         """
         [主动技能] 检查伏笔健康度。

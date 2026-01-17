@@ -22,7 +22,7 @@ class DirectorAgent:
         """结构化审计上下文 (Mid-Range View)"""
         # 1. Active Hooks (Including Stale)
         hooks = self.memory.get_active_foreshadowing()
-        stale_hooks = self.memory.get_stale_unresolved_hooks(limit=3)
+        stale_hooks = self.memory.get_stale_unresolved_hooks(limit=3, current_chapter=current_chapter)
         
         lines = []
         

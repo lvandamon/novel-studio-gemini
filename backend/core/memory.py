@@ -1970,6 +1970,67 @@ class MemoryManager:
             
         return "\n".join(result_lines)
 
+    def get_active_foreshadowing(self) -> List[Dict[str, Any]]:
+        """获取所有未回收的伏笔"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # 兼容性检查
+        try:
+             cursor.execute('SELECT id, chapter_created, content, importance FROM foreshadowing WHERE status = "active"')
+        except:
+             # Fallback if importance column missing (should be handled by migration but safe guard)
+             cursor.execute('SELECT id, chapter_created, content FROM foreshadowing WHERE status = "active"')
+             rows = cursor.fetchall()
+             conn.close()
+             return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": 5} for r in rows]
+
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [{"id": r[0], "chapter": r[1], "content": r[2], "importance": r[3] if r[3] is not None else 5} for r in rows]
+
+    def get_stale_unresolved_hooks(self, limit: int = 3, threshold: int = 50, current_chapter: int = None) -> List[Dict[str, Any]]:
+        """
+        🔥 P6新增: 获取陈旧且未解决的伏笔 (Long-range Hook Retrieval)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Determine current chapter if not provided
+        if current_chapter is None:
+            cursor.execute('SELECT MAX(chapter_num) FROM chapters')
+            row = cursor.fetchone()
+            current_chapter = row[0] if row and row[0] else 0
+
+        cutoff_chapter = current_chapter - threshold
+        
+        # 只关注 Subplot(4) 以上的伏笔
+        cursor.execute('''
+            SELECT id, chapter_created, content, importance 
+            FROM foreshadowing 
+            WHERE status = 'active' 
+              AND chapter_created <= ? 
+              AND importance >= 4
+            ORDER BY importance DESC, chapter_created ASC
+            LIMIT ?
+        ''', (cutoff_chapter, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        stale_hooks = []
+        for r in rows:
+            stale_hooks.append({
+                "id": r[0],
+                "chapter_created": r[1],
+                "content": r[2],
+                "importance": r[3],
+                "gap": current_chapter - r[1]
+            })
+            
+        return stale_hooks
+
     def add_foreshadowing(self, chapter_num: int, content: str, importance: int = 5, tags: List[str] = None):
         if tags is None: tags = []
         conn = sqlite3.connect(self.db_path)

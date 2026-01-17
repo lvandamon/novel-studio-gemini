@@ -70,12 +70,36 @@ class ContextManager:
         except:
             return {"type": "General", "needs_history": True, "needs_hooks": True, "needs_relations": True, "needs_world_rules": True}
 
-    def _smart_fit(self, content: str, budget: int) -> str:
-        """简单的智能压缩 (完整版见 P8 代码，这里简化以保证核心功能)"""
-        if self._count_tokens(content) <= budget:
+    def _semantic_compression(self, content: str, budget: int) -> str:
+        """
+        🔥 P8升级: 语义压缩引擎 (Semantic Compression Engine)
+        不再粗暴截断，而是使用 LLM 对非核心信息进行高密度摘要。
+        """
+        current_tokens = self._count_tokens(content)
+        if current_tokens <= budget:
             return content
+
+        print(f"   🤏 Context Compression Triggered: {current_tokens} -> Target {budget}")
         
-        # 简单截断兜底
+        # 尝试使用 LLM 压缩
+        try:
+            compressed = self.compressor_chain.invoke({
+                "content": content,
+                "budget": budget
+            })
+            
+            # Double check
+            if self._count_tokens(compressed) > budget * 1.2:
+                # If still too large, force truncate the *compressed* version (less lossy than truncating raw)
+                return self._force_truncate(compressed, budget)
+                
+            return f"=== 🧠 压缩记忆上下文 (Compressed Memory) ===\n{compressed}"
+        except Exception as e:
+            print(f"   ⚠️ Compression Failed: {e}, falling back to truncation.")
+            return self._force_truncate(content, budget)
+
+    def _force_truncate(self, content: str, budget: int) -> str:
+        """最后手段：硬截断"""
         lines = content.split('\n')
         kept = []
         curr = 0
@@ -84,7 +108,7 @@ class ContextManager:
             if curr + t > budget: break
             kept.append(line)
             curr += t
-        return "\n".join(kept) + "\n(Context Truncated)"
+        return "\n".join(kept) + "\n(Context Truncated by System Limit)"
 
     def build_director_context(self, chapter_num: int) -> str:
         """为 Director 提供宏观视角"""
@@ -131,7 +155,7 @@ class ContextManager:
 
     def build_writer_context(self, chapter_num: int, outline: str, active_characters: List[str], scene_location: str, atmosphere: Dict[str, str] = None, flashback_injection: str = None) -> str:
         """
-        Writer 上下文构建：意图驱动 + 纹理注入 + 创伤映射
+        Writer 上下文构建：意图驱动 + 纹理注入 + 创伤映射 + 迷雾系统
         """
         # 0. 意图分析
         intent = self._analyze_plot_intent(outline)
@@ -188,8 +212,17 @@ class ContextManager:
         pacing = focus.get('pacing', 'Normal')
         director_instruction = f"# 🎬 导演指令\n【节奏】: {pacing}"
         
-        used = self._count_tokens(state_text) + self._count_tokens(director_instruction)
-        retrieval_budget = max(2000, current_budget - used)
+        # 🔥 POV & Fog of War Constraint
+        pov_char = active_characters[0] if active_characters else "上帝视角"
+        pov_constraint = f"""
+# 👁️ 视角限制 (Fog of War)
+【当前POV角色】: {pov_char}
+⚠️ 严禁开启全知视角！你只能描写 {pov_char} 能看到、听到、感知到的信息。
+对于其他角色的心理活动，除非 {pov_char} 有读心术，否则只能通过表情和动作来侧面推测。
+"""
+        
+        used = self._count_tokens(state_text) + self._count_tokens(director_instruction) + self._count_tokens(pov_constraint)
+        retrieval_budget = max(4000, current_budget - used) # 保证至少有4k给检索
         
         # 4. Retrieval Layer (角色+关系+记忆)
         char_info = "# 👥 角色状态\n"
@@ -229,8 +262,8 @@ class ContextManager:
         if atmosphere:
             atm_text = f"\n# 🌡️ 氛围: {atmosphere.get('tone')} | Tension: {atmosphere.get('tension')}\n"
 
-        # Smart Fit
+        # Smart Fit with Semantic Compression
         retrieval_raw = f"{char_info}\n{graph_info}\n# 🧠 记忆碎片\n{rag_content}"
-        retrieval_optimized = self._smart_fit(retrieval_raw, retrieval_budget)
+        retrieval_optimized = self._semantic_compression(retrieval_raw, retrieval_budget)
         
-        return f"{bible_text}\n{physics_text}\n{ledger_text}\n{state_text}\n{director_instruction}\n{atm_text}\n{texture_text}\n{user_flashback}\n{retrieval_optimized}"
+        return f"{bible_text}\n{physics_text}\n{ledger_text}\n{state_text}\n{director_instruction}\n{pov_constraint}\n{atm_text}\n{texture_text}\n{user_flashback}\n{retrieval_optimized}"

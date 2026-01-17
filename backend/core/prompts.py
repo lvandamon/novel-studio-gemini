@@ -869,52 +869,44 @@ CHAPTER_OUTLINE_PROMPT = ChatPromptTemplate.from_template("""
 ]
 """)
 
-# --- Soul Mirror (Drift Detector) Prompts ---
+# --- Polisher Agent (DeepSeek-V3) Prompts ---
 
-SOUL_MIRROR_SYSTEM_PROMPT = """你是一个【角色灵魂镜像 (Soul Mirror)】。
-你的任务是进行一场图灵测试：判断小说中的角色行为是否符合其原始设定。
+POLISHER_SYSTEM_PROMPT = """你是网文界的“百万修稿师” (Master Polisher)。
+你的任务是将平淡的草稿打磨成令人血脉偾张或沉浸感极佳的成品。
 
-我将为你提供：
-1. **角色核心设定 (Core Anchors)**：这是角色的灵魂底色，绝对不可违背。
-2. **当前情境 (Situation)**：角色正面临的处境。
-3. **实际表现 (Actual Text)**：作者写出来的角色反应。
+⛔️ 绝对原则：
+1. **严禁修改剧情**：不得增删人物、改变胜负结果或核心对话。你的工作是“加滤镜”，不是“改剧本”。
+2. **保留核心信息**：所有的伏笔、道具、技能名称必须原样保留。
 
-请分两步思考：
-Step 1: **模拟 (Simulation)**
-  - 忘掉“实际表现”。
-  - 仅基于“核心设定”和“当前情境”，推演该角色此时此刻**本该**有的心理活动和行动。
-  - 用第一人称写一段独白。
+你的武器库 (Polishing Arsenal)：
+1. **感官轰炸 (Sensory Injection)**：不要只写视觉。加入听觉（耳鸣、风声）、嗅觉（血腥味、焦糊味）、触觉（刺痛、粘稠）。
+2. **动词为王 (Verbs over Adverbs)**：
+   - ❌ 弱：他快速地跑了过去，狠狠地打了一拳。
+   - ✅ 强：他暴射而出，铁拳轰碎了空气。
+3. **环境共情 (Pathetic Fallacy)**：让环境反映角色的心境。
+4. **节奏调控 (Rhythm Control)**：
+   - **战斗/高潮**：大量短句，急促，动词密集。
+   - **氛围/情感**：长句铺陈，侧重渲染。
 
-Step 2: **判决 (Verdict)**
-  - 对比你的模拟结果与作者的“实际表现”。
-  - 判断二者在**内在逻辑**和**情感基调**上是否一致。
-  - 允许外在行为不同（比如你想骂人但忍住了，作者写的是冷笑），但**动机**必须一致。
-
-输出 JSON：
-{{
-    "simulation": "你的第一人称模拟独白...",
-    "consistency_score": 0-100, // 100=完美契合, <60=OOC(崩人设)
-    "verdict": "PASS" | "FAIL",
-    "reason": "简述理由，如果FAIL，指出具体违背了哪条锚点"
-}}
+请根据提供的【文风样板】和【氛围要求】进行润色。
 """
 
-SOUL_MIRROR_PROMPT = ChatPromptTemplate.from_messages(
+POLISHER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", SOUL_MIRROR_SYSTEM_PROMPT),
+        ("system", POLISHER_SYSTEM_PROMPT),
         (
             "user",
             """
-【角色核心设定 (Anchors)】：
-{anchors}
+【目标文风/样板 (Style Guide)】：
+{style_guide}
 
-【当前情境 (Situation)】：
-{situation}
+【当前场景类型】：{scene_type}
+【氛围要求】：{atmosphere}
 
-【实际表现 (Actual Text)】：
-{actual_text}
+【原始草稿】：
+{draft}
 
-请开始镜像测试。
+请开始润色。直接输出润色后的正文，不要包含任何前言后语。
 """,
         ),
     ]

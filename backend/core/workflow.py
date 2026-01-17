@@ -8,6 +8,7 @@ from agents.director_agent import DirectorAgent
 from agents.editor_agent import EditorAgent
 from agents.simulator_agent import SimulatorAgent
 from agents.writer_agent import WriterAgent
+from agents.polisher_agent import PolisherAgent
 from agents.reviewer_agent import ReviewerAgent
 from agents.archivist_agent import ArchivistAgent
 from agents.reader_agent import ReaderAgent
@@ -56,6 +57,7 @@ class NovelWorkflow:
         self.editor = EditorAgent(self.context_manager)
         self.simulator = SimulatorAgent(memory)
         self.writer = WriterAgent(memory) # 🔥 P1: Pass memory to Writer
+        self.polisher = PolisherAgent(memory)
         self.reviewer = ReviewerAgent(memory)
         self.reader = ReaderAgent() # Initialize Reader
         self.archivist = ArchivistAgent(memory)
@@ -223,6 +225,13 @@ class NovelWorkflow:
         state["draft_content"] = draft
         return state
 
+    def node_polisher_polish(self, state: NovelState) -> NovelState:
+        """Node 3.5: Polisher (Stylistic Enhancement)"""
+        print(f"\n✨ === Workflow: Polisher Polishing ===")
+        polished = self.polisher.polish_draft(state["draft_content"], state["outline_data"])
+        state["draft_content"] = polished
+        return state
+
     def node_reviewer_check(self, state: NovelState) -> NovelState:
         """Node 4: Reviewer (Quality Control)"""
         print(f"\n🧐 === Workflow: Reviewer Checking ===")
@@ -373,6 +382,7 @@ class NovelWorkflow:
         workflow.add_node("editor", self.node_editor_gen)
         workflow.add_node("simulator", self.node_simulator_check)
         workflow.add_node("writer", self.node_writer_gen)
+        workflow.add_node("polisher", self.node_polisher_polish)
         workflow.add_node("reviewer", self.node_reviewer_check)
         workflow.add_node("reader", self.node_reader_eval) # Add Reader Node
         workflow.add_node("archivist", self.node_archivist_save)
@@ -393,7 +403,8 @@ class NovelWorkflow:
             }
         )
         
-        workflow.add_edge("writer", "reviewer")
+        workflow.add_edge("writer", "polisher")
+        workflow.add_edge("polisher", "reviewer")
         
         # Conditional Edge: Reviewer -> Reader (Pass) OR Writer (Reject)
         workflow.add_conditional_edges(
