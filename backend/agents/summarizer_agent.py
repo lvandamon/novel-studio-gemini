@@ -315,30 +315,64 @@ class SummarizerAgent:
             print(f"   ❌ [Summarizer] 聚合执行出错: {e}")
 
     def _fetch_source_summaries(self, source_level: str, start: int, end: int) -> str:
-        """从数据库抓取并拼接源摘要"""
+        """
+        🔥 P13升级: 增强型源数据抓取 (Anchor Piercing)
+        不仅抓取摘要，还强制抓取该范围内的关键事件和伏笔，防止"复印件效应"。
+        """
         buffer = []
         
+        # 1. 抓取文本摘要
         if source_level == "chapter":
-            # 从 chapters 表抓取
             for i in range(start, end + 1):
                 s = self.memory.get_chapter_summary(i)
                 if s and s != "暂无摘要。":
-                    buffer.append(f"[Ch{i}]: {s}")
+                    buffer.append(f"### Chapter {i}\n{s}")
                     
         elif source_level == "batch_10":
-            # 从 summary_aggregations 表抓取 batch_10
-            # 这里的 start/end 是章节号范围
-            # 我们需要查找覆盖这个范围的所有 batch_10 记录
-            # 假设 batch_10 是严格对齐的 (1-10, 11-20...)
-            
-            # 获取所有 batch_10，然后筛选 (性能稍差但逻辑简单，考虑到数据量不大)
             all_batches = self.memory.get_aggregated_summaries("batch_10")
             for b in all_batches:
                 b_start = b['start']
                 b_end = b['end']
-                # 检查是否在目标范围内
                 if b_start >= start and b_end <= end:
-                    buffer.append(f"[阶段 {b_start}-{b_end}]: {b['content']}")
+                    buffer.append(f"### Batch {b_start}-{b_end}\n{b['content']}")
+
+        # 2. 🔥 注入硬逻辑 (Hard Logic Injection)
+        # 从 SQL 中直接提取该范围内的关键数据，绕过摘要的损耗
+        try:
+            conn = sqlite3.connect(self.memory.db_path)
+            cursor = conn.cursor()
+            
+            # A. 关键事件 (Major Events Only)
+            cursor.execute('''
+                SELECT chapter_num, character_name, event_type, description 
+                FROM events 
+                WHERE chapter_num BETWEEN ? AND ? 
+                  AND event_type IN ('Climax', 'Major_Battle', 'Death', 'Revelation', 'Arc_End')
+            ''', (start, end))
+            
+            events = cursor.fetchall()
+            if events:
+                buffer.append("\n=== ⚡️ 关键事件 (不可忽略) ===")
+                for e in events:
+                    buffer.append(f"- [Ch{e[0]}] {e[1]} {e[2]}: {e[3]}")
+            
+            # B. 新增伏笔 (New Hooks)
+            cursor.execute('''
+                SELECT chapter_created, content, importance 
+                FROM foreshadowing 
+                WHERE chapter_created BETWEEN ? AND ? AND importance >= 7
+            ''', (start, end))
+            
+            hooks = cursor.fetchall()
+            if hooks:
+                buffer.append("\n=== 🎣 核心伏笔 (必须保留) ===")
+                for h in hooks:
+                    buffer.append(f"- [Ch{h[0]}] (Imp:{h[2]}) {h[1]}")
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"   ⚠️ [Summarizer] 硬逻辑注入失败: {e}")
         
         return "\n".join(buffer)
 

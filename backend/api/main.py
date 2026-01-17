@@ -184,11 +184,24 @@ def update_workflow_state(req: StateUpdateRequest):
 # --- Graph Visualization ---
 
 @app.get("/api/graph/visualize")
-def visualize_graph(limit: int = 100):
-    """Get Neo4j graph data for frontend visualization."""
+def visualize_graph(
+    limit: int = 100, 
+    start_chapter: Optional[int] = None, 
+    end_chapter: Optional[int] = None, 
+    focus_node: Optional[str] = None
+):
+    """
+    Get Neo4j graph data for frontend visualization.
+    Supports filtering by chapter range (Time Slider) and focus entity (Spotlight).
+    """
     mem: MemoryManager = system_state["memory"]
     try:
-        data = mem.graph.get_visualization_data(limit=limit)
+        data = mem.graph.get_visualization_data(
+            limit=limit, 
+            start_chapter=start_chapter, 
+            end_chapter=end_chapter, 
+            focus_node=focus_node
+        )
         return data
     except Exception as e:
         raise HTTPException(500, f"Graph error: {e}")

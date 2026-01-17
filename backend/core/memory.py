@@ -2651,33 +2651,43 @@ class MemoryManager:
         except Exception as e:
             print(f"   ⚠️ Vector Archive Failed: {e}")
 
-    def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False) -> str:
+    def query_related_context(self, query: str, k: int = 5, current_chapter: int = None, include_archived: bool = False, scope_metadata: Dict[str, Any] = None) -> str:
         """
         🔥 P0优化版 + P6修复 + P8升级: 分区混合检索 (Partitioned Hybrid Retrieval)
 
-        修复说明:
-        - 移除了旧的 500 章硬窗口限制，解决了长程记忆断裂问题。
-        - 采用 "近期热区(Recent)" + "全局高优(Global)" 双轨检索策略。
-        - 确保早期的伏笔和核心设定(即使在1000章以前)也能被召回。
-
-        P8升级:
-        - 动态检索窗口: 根据总章节数自适应调整近期窗口
-        - 时间衰减权重: 越早的内容权重越低，但不会完全消失
-        - 重要性提权: Core伏笔和Bible内容获得更高权重
+        Args:
+            scope_metadata: 额外的元数据过滤器 (e.g. {"arc": "新手村", "type": "world_setting"})
         """
         final_docs = {} # id/content_key -> Document
 
         # --- P8升级: 动态检索窗口配置 ---
         total_chapters = self._get_total_chapters()
-        # 动态窗口: 至少200章，最多回顾总章节的15%
         recent_window_size = max(200, min(500, total_chapters // 7))
-        recent_k = k              # 近期检索数量
-        global_k = max(5, k)      # 全局检索数量 (保持较高召回)
+        recent_k = k
+        global_k = max(5, k)
 
         # 基础过滤
         base_filter = {}
         if not include_archived:
             base_filter = {"status": "active"}
+            
+        # 🔥 P13新增: 合并范围过滤器
+        if scope_metadata:
+            # Chroma 的 filter 语法是 {"key": "value"} 或 {"$and": [...]}
+            # 这里简单处理: 均视为 AND 关系
+            if base_filter:
+                # 如果已有 base，转为 $and
+                filters = [base_filter]
+                for k, v in scope_metadata.items():
+                    filters.append({k: v})
+                base_filter = {"$and": filters}
+            else:
+                # 否则直接用 scope
+                if len(scope_metadata) > 1:
+                    filters = [{k: v} for k, v in scope_metadata.items()]
+                    base_filter = {"$and": filters}
+                else:
+                    base_filter = scope_metadata
 
         # --- Track 1: 近期热区检索 (High Precision) ---
         # 目标: 获取最近发生的、细节丰富的情节

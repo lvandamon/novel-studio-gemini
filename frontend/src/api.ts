@@ -48,8 +48,13 @@ export const api = {
 
   // --- Knowledge Graph ---
 
-  async getGraphData(limit: number = 100) {
-    const res = await axios.get(`${API_BASE}/graph/visualize?limit=${limit}`);
+  async getGraphData(limit: number = 100, startChapter?: number, endChapter?: number, focusNode?: string) {
+    let url = `${API_BASE}/graph/visualize?limit=${limit}`;
+    if (startChapter !== undefined) url += `&start_chapter=${startChapter}`;
+    if (endChapter !== undefined) url += `&end_chapter=${endChapter}`;
+    if (focusNode) url += `&focus_node=${encodeURIComponent(focusNode)}`;
+    
+    const res = await axios.get(url);
     return res.data as GraphData;
   },
 

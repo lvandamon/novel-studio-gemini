@@ -1149,14 +1149,55 @@ class GraphManager:
         return f"{title}\n" + "\n".join(sorted(list(paths_found)))
 
     @retry_neo4j()
-    def get_visualization_data(self, limit: int = 100) -> Dict[str, List[Dict]]:
-        query = f"""
-        MATCH (n)-[r]->(m)
-        RETURN n.name as source, labels(n) as source_label, 
-               type(r) as relation, 
-               m.name as target, labels(m) as target_label
-        LIMIT $limit
+    def get_visualization_data(self, limit: int = 100, start_chapter: int = None, end_chapter: int = None, focus_node: str = None) -> Dict[str, List[Dict]]:
         """
+        🔥 P14升级: 动态切片可视化 (Spotlight View)
+        支持按章节范围过滤，支持以特定节点为中心的一阶邻居查询。
+        """
+        params = {"limit": limit}
+        where_clauses = []
+        
+        # 1. 章节过滤 (Chapter Slicing)
+        if start_chapter is not None:
+            where_clauses.append("(r.start_chapter IS NULL OR r.start_chapter >= $start_ch)")
+            params["start_ch"] = start_chapter
+            
+        if end_chapter is not None:
+            # 这里的 end_chapter 指的是关系结束的章节（例如关系破裂）
+            # 或者我们希望看到在这个时间段内 *存在* 的关系
+            # 逻辑: 关系的开始时间 < 观察窗口结束 AND (关系的结束时间 > 观察窗口开始 OR 关系未结束)
+            where_clauses.append("(r.start_chapter IS NULL OR r.start_chapter <= $end_ch)")
+            where_clauses.append("(r.end_chapter IS NULL OR r.end_chapter >= $start_ch_window)")
+            params["end_ch"] = end_chapter
+            params["start_ch_window"] = start_chapter if start_chapter else 0
+
+        where_stmt = " AND ".join(where_clauses)
+        if where_stmt:
+            where_stmt = "WHERE " + where_stmt
+
+        # 2. 聚焦节点 (Spotlight Mode)
+        if focus_node:
+            # 仅查询该节点及其一阶邻居
+            query = f"""
+            MATCH (center {{name: $center_name}})
+            MATCH (center)-[r]-(neighbor)
+            {where_stmt}
+            RETURN center.name as source, labels(center) as source_label,
+                   type(r) as relation,
+                   neighbor.name as target, labels(neighbor) as target_label
+            LIMIT $limit
+            """
+            params["center_name"] = focus_node
+        else:
+            # 全局视图 (Global View)
+            query = f"""
+            MATCH (n)-[r]->(m)
+            {where_stmt}
+            RETURN n.name as source, labels(n) as source_label, 
+                   type(r) as relation, 
+                   m.name as target, labels(m) as target_label
+            LIMIT $limit
+            """
         
         nodes = {}
         edges = []
@@ -1170,7 +1211,7 @@ class GraphManager:
         }
 
         with self.driver.session() as session:
-            result = session.run(query, limit=limit)
+            result = session.run(query, **params)
             for record in result:
                 s_name = record["source"]
                 s_label = record["source_label"][0] if record["source_label"] else "Unknown"

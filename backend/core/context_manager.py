@@ -242,7 +242,33 @@ class ContextManager:
 
         # RAG Memory
         rag_query = f"{ ' '.join(active_characters)} {outline}"
-        rag_content = self.memory.query_related_context(rag_query, k=10, current_chapter=chapter_num)
+        
+        # 🔥 P13升级: 意图驱动的动态检索范围 (Intent-Driven Scope)
+        include_archived = False
+        rag_scope = {}
+        
+        intent_type = intent.get("type", "General")
+        
+        if intent_type == "Flashback":
+            include_archived = True
+            print("   🕰️ Context:启用时光机 (Include Archived Memories)")
+            
+        elif intent_type == "Worldbuilding":
+            rag_scope = {"type": "world_setting"}
+            print("   🌍 Context: 聚焦世界设定 (World Setting Focus)")
+            
+        elif intent_type == "Combat":
+            # 战斗时优先检索技能和规则
+            # 暂时不强加 filter，依靠语义检索，但可以提升 query 权重
+            rag_query += " combat rules magic system abilities weakness"
+
+        rag_content = self.memory.query_related_context(
+            rag_query, 
+            k=10, 
+            current_chapter=chapter_num,
+            include_archived=include_archived,
+            scope_metadata=rag_scope
+        )
         
         # 🔥 P5: Texture Retrieval (高光纹理注入)
         texture_text = ""
