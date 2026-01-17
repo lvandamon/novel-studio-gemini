@@ -385,15 +385,15 @@ JSON 结构规范：
     "new_foreshadowing": [...],
     "resolved_foreshadowing_ids": [1, 5], 
     "character_evolutions": [ // 🔥 P9新增: 角色性格演化
-        {
+        {{
             "character_name": "...",
             "new_epoch_name": "...", // e.g. "黑化期"
             "trigger_reason": "...",
             "shattered_anchors": ["..."], // 被打破的旧锚点内容
             "new_anchors": [
-                {"category": "Motivation", "content": "..."}
+                {{"category": "Motivation", "content": "..."}}
             ]
-        }
+        }}
     ],
     "world_updates": [],
     "current_date": "..."

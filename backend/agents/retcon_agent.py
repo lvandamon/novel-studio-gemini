@@ -146,6 +146,7 @@ class RetconAgent:
                     )
 
         # 🔥 P11: Causality Taint Analysis (Ripple Effect Check)
+        impact_report = ""
         if not dry_run:
             affected_entities = set()
             for update in plan.get("entity_updates", []):
@@ -153,13 +154,26 @@ class RetconAgent:
             for rel in plan.get("relationship_updates", []):
                 affected_entities.add(rel["source"])
             
+            tainted_list = []
+            impact_details = []
+            
             for entity in affected_entities:
+                # 1. Get downstream list
                 tainted = self.memory.graph.get_downstream_dependencies(entity, depth=2)
                 if tainted:
-                    warning = f"⚠️ [Ripple Warning] Modifying '{entity}' may impact downstream entities: {', '.join(tainted[:5])}..."
+                    tainted_list.extend(tainted)
+                    warning = f"⚠️ [Ripple Warning] Modifying '{entity}' may impact: {', '.join(tainted[:5])}..."
                     logs.append(warning)
-                    # Optional: Log to system event for Director to see
-                    self.memory.log_event(0, "SYSTEM", "RETCON_WARNING", warning)
+                
+                # 2. Get detailed impact subgraph (Text)
+                subgraph_text = self.memory.graph.get_impact_subgraph(entity)
+                if "系统未检测到" not in subgraph_text:
+                    impact_details.append(subgraph_text)
+            
+            if tainted_list:
+                impact_report = f"\n【潜在波及/IMPACT】\n此修正可能会影响以下实体：{', '.join(list(set(tainted_list)))}。\n"
+                if impact_details:
+                    impact_report += "详细影响网络：\n" + "\n".join(impact_details)
 
         # 3. Patch Events / VectorDB (Inject Retcon Knowledge)
         # 我们不删除旧向量，而是注入一条“高优先级”的修正规则进入 World Bible 或特殊 Retcon Collection
@@ -173,7 +187,8 @@ class RetconAgent:
             if not dry_run:
                 # 将修正作为一条“绝对真理”存入 World Bible，
                 # 并加上特殊的 Retcon 标签，使其检索权重极高
-                content = f"【历史修正/RETCON】关于 '{query}' 的真实情况是：{new_desc}。旧有记录若有冲突，以此为准。"
+                # 🔥 Integrated Impact Report into the Bible Entry
+                content = f"【历史修正/RETCON】关于 '{query}' 的真实情况是：{new_desc}。旧有记录若有冲突，以此为准。{impact_report}"
                 self.memory.add_bible_entry(
                     category="RETCON_HISTORY",
                     topic=f"修正: {query[:10]}...",

@@ -358,7 +358,14 @@ class NovelWorkflow:
         print(f"   ✅ 审核通过 (Logic: {logic_score}, Alignment: {alignment_score})")
         return "approve"
 
-    def build_graph(self):
+    def build_graph(self, db_path: str = "data/workflow_state.db", enable_interrupts: bool = True):
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        import sqlite3
+
+        # Setup Checkpointer DB connection
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        memory_saver = SqliteSaver(conn)
+
         workflow = StateGraph(NovelState)
         
         # Add Nodes
@@ -410,4 +417,10 @@ class NovelWorkflow:
             }
         )
         
-        return workflow.compile()
+        # Compile with Checkpointer and Interrupt Logic
+        # interrupt_before: 在进入这些节点前暂停，允许人类修改 State
+        interrupts = ["editor", "writer", "archivist"] if enable_interrupts else []
+        return workflow.compile(
+            checkpointer=memory_saver,
+            interrupt_before=interrupts 
+        )

@@ -84,8 +84,12 @@ def run_stress_test(start_chapter=1, end_chapter=10):
         init_style_data(memory)
     
     workflow = NovelWorkflow(memory)
-    app = workflow.build_graph()
+    # Disable interrupts for automated stress testing
+    app = workflow.build_graph(db_path=db_path, enable_interrupts=False)
     
+    # Config for checkpointer
+    config = {"configurable": {"thread_id": "stress_test_session_v1"}}
+
     # 2. Loop
     for i in range(start_chapter, end_chapter + 1):
         print(f"\n\n⚡️⚡️⚡️ [STRESS TEST] Processing Chapter {i} ⚡️⚡️⚡️")
@@ -100,7 +104,8 @@ def run_stress_test(start_chapter=1, end_chapter=10):
         
         # Run Workflow
         try:
-            final_state = app.invoke(state)
+            # Pass config
+            final_state = app.invoke(state, config=config)
             
             # 3. Validation & Telemetry
             duration = time.time() - start_time
@@ -135,4 +140,4 @@ def run_stress_test(start_chapter=1, end_chapter=10):
 
 if __name__ == "__main__":
     # You can adjust the range here
-    run_stress_test(start_chapter=1, end_chapter=5)
+    run_stress_test(start_chapter=1, end_chapter=2)

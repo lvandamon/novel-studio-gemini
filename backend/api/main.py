@@ -1,12 +1,10 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
 import sqlite3
 import json
-import os
-import pandas as pd
 from contextlib import asynccontextmanager
 
 # Import Core Systems
@@ -21,31 +19,28 @@ logger = logging.getLogger("api")
 system_state = {
     "memory": None,
     "workflow": None,
-    "workflow_app": None,
-    "is_generating": False,
-    "last_error": None
+    "workflow_app": None
 }
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the heavy AI models on startup"""
-    logger.info("🚀 Booting Novel Studio Backend...")
+    logger.info("🚀 Booting Novel Studio Backend (Stateful Mode)...")
     try:
         system_state["memory"] = MemoryManager()
         system_state["workflow"] = NovelWorkflow(system_state["memory"])
-        system_state["workflow_app"] = system_state["workflow"].build_graph()
+        # Build with persistence
+        system_state["workflow_app"] = system_state["workflow"].build_graph(db_path="data/workflow_state.db")
         logger.info("✅ System Ready")
     except Exception as e:
         logger.error(f"❌ Boot failed: {e}")
     yield
-    # Cleanup if needed
 
 app = FastAPI(title="DeepSeek Novel Studio API", lifespan=lifespan)
 
-# CORS (Allow Frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, lock this down
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,188 +48,187 @@ app.add_middleware(
 
 # --- Pydantic Models ---
 
-class GenerateRequest(BaseModel):
-    instruction: str
-    flashback: Optional[str] = None
+class StartRequest(BaseModel):
+    chapter_num: int
+    instruction: Optional[str] = None
     force_director: bool = True
 
-class ChapterUpdate(BaseModel):
-    content: str
-
-class ChapterInfo(BaseModel):
+class ResumeRequest(BaseModel):
     chapter_num: int
-    title: Optional[str]
-    summary: Optional[str]
-    content: Optional[str]
+    user_input: Optional[Dict[str, Any]] = None # Input to next node
 
-# --- Endpoints ---
+class StateUpdateRequest(BaseModel):
+    chapter_num: int
+    state_updates: Dict[str, Any]
 
-@app.get("/api/health")
-def health_check():
-    return {"status": "ok", "ready": system_state["memory"] is not None}
+class GraphVizRequest(BaseModel):
+    center_entity: Optional[str] = None
+    depth: int = 2
 
-@app.get("/api/state")
-def get_current_state():
-    """Get the 'Head' of the novel (next chapter info)"""
-    if not system_state["memory"]:
-        raise HTTPException(status_code=503, detail="System initializing")
-    
-    mem: MemoryManager = system_state["memory"]
-    
-    # Get Max Chapter
-    try:
-        conn = sqlite3.connect(mem.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT MAX(chapter_num) FROM chapters")
-        row = cur.fetchone()
-        last_chap = row[0] if row and row[0] else 0
-        conn.close()
-    except:
-        last_chap = 0
+# --- Helpers ---
 
-    next_chap = last_chap + 1
-    
-    return {
-        "current_chapter": next_chap,
-        "last_chapter": last_chap,
-        "is_generating": system_state["is_generating"],
-        "focus": mem.get_narrative_focus(),
-        "active_plan": mem.get_active_plan()
-    }
+def get_thread_config(chapter_num: int):
+    return {"configurable": {"thread_id": str(chapter_num)}}
 
-@app.post("/api/generate")
-def generate_chapter_endpoint(req: GenerateRequest):
-    """Trigger the LangGraph Workflow"""
-    if system_state["is_generating"]:
-        raise HTTPException(status_code=409, detail="Already generating")
-    
+# --- Workflow Endpoints ---
+
+@app.post("/api/workflow/start")
+def start_workflow(req: StartRequest):
+    """Start (or restart) the workflow for a specific chapter."""
     if not system_state["workflow_app"]:
-        raise HTTPException(status_code=503, detail="System not ready")
-
-    system_state["is_generating"] = True
+        raise HTTPException(503, "System not ready")
+    
     mem: MemoryManager = system_state["memory"]
     
-    # Calculate Next Chapter
-    # (Simplified: assume we always write the next sequential chapter)
-    try:
-        conn = sqlite3.connect(mem.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT MAX(chapter_num) FROM chapters")
-        row = cur.fetchone()
-        next_chap = (row[0] + 1) if row and row[0] else 1
-        conn.close()
-    except:
-        next_chap = 1
-
-    # Prepare Input State
+    # 1. Prepare Initial State
     initial_state = {
-        "chapter_num": next_chap,
+        "chapter_num": req.chapter_num,
         "narrative_plan": mem.get_active_plan(),
         "narrative_focus": mem.get_narrative_focus(),
         "revision_count": 0,
         "director_ran": req.force_director,
-        "flashback_injection": req.instruction if req.instruction else None
+        "flashback_injection": req.instruction if req.instruction else None,
+        # Reset flags
+        "requires_director_review": False,
+        "high_risk_flag": False,
+        "archivist_rejected": False,
+        "intervention_reason": None,
+        "simulator_feedback": "",
+        "review_feedback": ""
     }
     
+    config = get_thread_config(req.chapter_num)
+    
+    # 2. Start Execution (Run until first interrupt)
     try:
-        # Run blocking (for now)
-        logger.info(f"🎬 Starting generation for Ch.{next_chap} with instruction: {req.instruction}")
-        result = system_state["workflow_app"].invoke(initial_state)
+        # We use stream to run until the first interruption
+        # Since we have interrupt_before=["editor", "writer", "archivist"], 
+        # it will likely stop before 'editor' first if Director passes.
         
-        system_state["is_generating"] = False
+        # Note: If this is a fresh start, we invoke.
+        # But LangGraph invoke with checkpointer will resume if thread exists? 
+        # Better to update state and then resume/invoke.
         
-        if result.get("final_content"):
-            return {
-                "success": True, 
-                "chapter_num": next_chap,
-                "content": result.get("final_content"),
-                "logs": ["Generation Complete"] # We need better logging strategy later
-            }
-        else:
-            return {
-                "success": False,
-                "error": result.get("intervention_reason", "Unknown error")
-            }
+        # Let's clean slate for this thread if it exists? 
+        # For safety, we just update the state with the new initial values
+        system_state["workflow_app"].update_state(config, initial_state)
+        
+        # Run!
+        # This will run until it hits an interrupt node
+        for event in system_state["workflow_app"].stream(None, config):
+            pass # Just consume stream to execute
             
-    except Exception as e:
-        system_state["is_generating"] = False
-        logger.error(f"Generate failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/chapters/{chapter_num}")
-def get_chapter(chapter_num: int):
-    mem: MemoryManager = system_state["memory"]
-    if not mem:
-        raise HTTPException(503)
+        return get_workflow_state(req.chapter_num)
         
-    try:
-        conn = sqlite3.connect(mem.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT title, summary, content FROM chapters WHERE chapter_num = ?", (chapter_num,))
-        row = cur.fetchone()
-        conn.close()
-        
-        if row:
-            return {"chapter_num": chapter_num, "title": row[0], "summary": row[1], "content": row[2]}
-        else:
-            raise HTTPException(404, detail="Chapter not found")
     except Exception as e:
-        raise HTTPException(500, detail=str(e))
+        logger.error(f"Start failed: {e}")
+        raise HTTPException(500, str(e))
 
-@app.put("/api/chapters/{chapter_num}")
-def update_chapter(chapter_num: int, update: ChapterUpdate):
+@app.get("/api/workflow/{chapter_num}/state")
+def get_workflow_state(chapter_num: int):
+    """Get the current state of the workflow (where is it paused?)."""
+    app_graph = system_state["workflow_app"]
+    config = get_thread_config(chapter_num)
+    
+    try:
+        current_state = app_graph.get_state(config)
+        if not current_state:
+            return {"status": "not_started"}
+            
+        return {
+            "status": "active" if current_state.next else "completed",
+            "next_nodes": current_state.next,
+            "state_values": current_state.values,
+            "created_at": current_state.created_at,
+            "config": current_state.config
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/workflow/resume")
+def resume_workflow(req: ResumeRequest):
+    """Resume execution from the current pause point."""
+    app_graph = system_state["workflow_app"]
+    config = get_thread_config(req.chapter_num)
+    
+    try:
+        # Run until next interrupt
+        # Pass user_input if any (e.g. human feedback)
+        input_data = req.user_input if req.user_input else None
+        
+        for event in app_graph.stream(input_data, config):
+            pass
+            
+        return get_workflow_state(req.chapter_num)
+    except Exception as e:
+        logger.error(f"Resume failed: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/workflow/update")
+def update_workflow_state(req: StateUpdateRequest):
+    """
+    GOD MODE: Manually inject state updates.
+    Use this to edit the 'outline', 'draft_content', or force 'director_ran' flag.
+    """
+    app_graph = system_state["workflow_app"]
+    config = get_thread_config(req.chapter_num)
+    
+    try:
+        # as_node: pretend this update came from the node that just finished or is about to run
+        # Usually we just update the state directly.
+        app_graph.update_state(config, req.state_updates)
+        return {"success": True, "new_state": get_workflow_state(req.chapter_num)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# --- Graph Visualization ---
+
+@app.get("/api/graph/visualize")
+def visualize_graph(limit: int = 100):
+    """Get Neo4j graph data for frontend visualization."""
     mem: MemoryManager = system_state["memory"]
     try:
-        conn = sqlite3.connect(mem.db_path)
-        cur = conn.cursor()
-        cur.execute("UPDATE chapters SET content = ? WHERE chapter_num = ?", (update.content, chapter_num))
-        conn.commit()
-        conn.close()
-        return {"success": True}
+        data = mem.graph.get_visualization_data(limit=limit)
+        return data
     except Exception as e:
-        raise HTTPException(500, detail=str(e))
+        raise HTTPException(500, f"Graph error: {e}")
+
+@app.get("/api/graph/impact")
+def visualize_impact(entity: str):
+    """Get the 'Impact Subgraph' for a specific entity."""
+    mem: MemoryManager = system_state["memory"]
+    try:
+        # Get structured impact data
+        data = mem.graph.get_impact_subgraph_data(entity)
+        return data
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# --- Traditional Data ---
+
+class CharacterUpdateRequest(BaseModel):
+    updates: Dict[str, Any]
+
+@app.post("/api/characters/{name}/update")
+def update_character(name: str, req: CharacterUpdateRequest):
+    """GOD MODE: Manually update character attributes in SQLite."""
+    mem: MemoryManager = system_state["memory"]
+    try:
+        mem.upsert_character(name, req.updates, chapter_num=9999) # 9999 for manual intervention
+        return {"success": True, "character": mem.get_character(name)}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @app.get("/api/characters")
 def list_characters():
     mem: MemoryManager = system_state["memory"]
-    try:
-        conn = sqlite3.connect(mem.db_path)
-        df = pd.read_sql("SELECT id, name, data FROM characters", conn) # Requires pandas
-        conn.close()
-        
-        chars = []
-        for _, row in df.iterrows():
-            d = json.loads(row['data'])
-            chars.append({
-                "id": row['id'],
-                "name": row['name'],
-                "role": d.get("role", "NPC"),
-                "state": d.get("current_state", "Normal")
-            })
-        return chars
-    except Exception as e:
-        # Fallback if pandas not imported inside function, though it is global in memory.py? 
-        # Actually memory.py imports pandas. But main.py needs it if we use it here.
-        # Let's use pure sqlite3 to be safe
-        conn = sqlite3.connect(mem.db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, data FROM characters")
-        rows = cur.fetchall()
-        conn.close()
-        
-        chars = []
-        for r in rows:
-            try:
-                d = json.loads(r[2])
-                chars.append({
-                    "id": r[0],
-                    "name": r[1],
-                    "role": d.get("role", "NPC"),
-                    "state": d.get("current_state", "Unknown")
-                })
-            except:
-                pass
-        return chars
+    return mem.list_characters()
+
+# --- Standard Info ---
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "mode": "stateful"}
 
 if __name__ == "__main__":
     import uvicorn

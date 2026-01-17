@@ -1,252 +1,321 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  BookOpen, 
-  PenTool, 
-  Map, 
-  Globe, 
-  Activity, 
-  Send, 
-  Save, 
-  Loader2,
-  Menu,
-  ChevronRight,
-  Bot,
-  User
-} from 'lucide-react';
+import React, { useState, useEffect } from 'react';
 import { api } from './api';
-import clsx from 'clsx';
-
-// --- Types ---
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-}
+import type { WorkflowState } from './api';
+import KnowledgeGraph from './components/KnowledgeGraph';
 
 // --- Components ---
 
-const Sidebar = () => (
-  <div className="w-16 h-screen bg-gray-50 border-r border-gray-200 flex flex-col items-center py-6 gap-6 z-10">
-    <div className="p-2 bg-gray-900 text-white rounded-lg mb-4">
-      <BookOpen size={24} />
-    </div>
-    
-    <NavIcon icon={<PenTool />} label="Write" active />
-    <NavIcon icon={<Map />} label="Plot" />
-    <NavIcon icon={<Globe />} label="World" />
-    <NavIcon icon={<Activity />} label="Stats" />
+const StatCard = ({ label, value, color = "blue" }: { label: string, value: string | number, color?: string }) => (
+  <div className={`p-4 bg-white border-l-4 border-${color}-500 shadow-sm rounded-r-lg`}>
+    <div className="text-xs text-gray-500 uppercase font-bold">{label}</div>
+    <div className="text-xl font-mono">{value}</div>
   </div>
 );
 
-const NavIcon = ({ icon, label, active = false }: { icon: React.ReactNode, label: string, active?: boolean }) => (
-  <div className={clsx(
-    "p-3 rounded-xl cursor-pointer transition-all duration-200 group relative",
-    active ? "bg-white shadow-sm text-gray-900" : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-  )}>
-    {icon}
-    <span className="absolute left-14 bg-gray-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-      {label}
-    </span>
-  </div>
-);
-
-// --- Main App ---
-
-export default function App() {
-  // State
-  const [content, setContent] = useState("");
+const App: React.FC = () => {
   const [chapterNum, setChapterNum] = useState(1);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Director Online. 准备好开始了吗？' }
-  ]);
-  const [input, setInput] = useState("");
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [instruction, setInstruction] = useState("");
+  const [workflow, setWorkflow] = useState<WorkflowState | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  
+  // View Mode: 'writer' | 'graph'
+  const [viewMode, setViewMode] = useState<'writer' | 'graph'>('writer');
 
-  // Load initial state
+  // Auto-refresh state if active
   useEffect(() => {
-    loadState();
-  }, []);
+    let interval: any;
+    if (workflow?.status === 'active' && workflow.next_nodes.length === 0) {
+      // If it's running but not paused yet, poll
+      interval = setInterval(async () => {
+        const newState = await api.getWorkflowState(chapterNum);
+        setWorkflow(newState);
+      }, 2000);
+    }
+    return () => clearInterval(interval);
+  }, [workflow, chapterNum]);
 
-  // Auto-scroll chat
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 10));
 
-  const loadState = async () => {
+  const handleStart = async () => {
+    setLoading(true);
+    addLog(`🚀 启动章节 ${chapterNum} 生成任务...`);
     try {
-      const state = await api.getState();
-      setChapterNum(state.current_chapter);
-      // Try to load content if it exists (previous chapter or current draft)
-      try {
-        const chap = await api.getChapter(state.current_chapter);
-        if (chap.content) setContent(chap.content);
-      } catch (e) {
-        // No content yet, that's fine
-      }
+      const state = await api.startWorkflow(chapterNum, instruction);
+      setWorkflow(state);
+      addLog(`✅ 工作流已初始化，当前停在: ${state.next_nodes.join(', ')}`);
     } catch (e) {
-      console.error("Failed to load state", e);
+      addLog(`❌ 启动失败: ${e}`);
+    }
+    setLoading(false);
+  };
+
+  const handleResume = async () => {
+    setLoading(true);
+    addLog(`⏭ 继续执行下一阶段...`);
+    try {
+      const state = await api.resumeWorkflow(chapterNum);
+      setWorkflow(state);
+      addLog(`✅ 已恢复，当前停在: ${state.next_nodes.join(', ')}`);
+    } catch (e) {
+      addLog(`❌ 恢复失败: ${e}`);
+    }
+    setLoading(false);
+  };
+
+  const handleUpdate = async (field: string, value: any) => {
+    addLog(`🛠 正在手动修改状态: ${field}...`);
+    try {
+      await api.updateState(chapterNum, { [field]: value });
+      const state = await api.getWorkflowState(chapterNum);
+      setWorkflow(state);
+      addLog(`✅ 状态已同步。`);
+    } catch (e) {
+      addLog(`❌ 修改失败: ${e}`);
     }
   };
 
-  const handleGenerate = async () => {
-    if (!input.trim()) return;
-
-    const userMsg = input;
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-    setInput("");
-    setIsGenerating(true);
-
-    // Add thinking placeholder
-    setMessages(prev => [...prev, { role: 'assistant', content: 'Thinking...' }]);
-
+  const handleForcePass = async () => {
+    addLog(`🛡️ 正在执行上帝权限: 强制通过模拟器...`);
     try {
-      const res = await api.generate(userMsg);
-      
-      if (res.success) {
-        // Update content
-        setContent(res.content);
-        // Update chat by replacing "Thinking..."
-        setMessages(prev => [
-          ...prev.slice(0, -1), 
-          { role: 'assistant', content: `✅ Chapter ${res.chapter_num} Generated.` }
-        ]);
-        setChapterNum(res.chapter_num + 1); // Advance for next
-      } else {
-        setMessages(prev => [
-          ...prev.slice(0, -1), 
-          { role: 'assistant', content: `❌ Error: ${res.error}` }
-        ]);
-      }
+      // Set feedback to PASS to bypass the conditional edge logic
+      await api.updateState(chapterNum, { "simulator_feedback": "PASS" });
+      const state = await api.resumeWorkflow(chapterNum);
+      setWorkflow(state);
+      addLog(`✅ 已强行突破逻辑死锁。`);
     } catch (e) {
-      setMessages(prev => [
-        ...prev.slice(0, -1), 
-        { role: 'assistant', content: `❌ System Error: ${e}` }
-      ]);
-    } finally {
-      setIsGenerating(false);
+      addLog(`❌ 强制通过失败: ${e}`);
     }
   };
 
-  const handleSave = async () => {
+  const handleFixCharacter = async (name: string, field: string, value: any) => {
+    addLog(`🛠 上帝模式: 正在修正角色 ${name} 的 ${field}...`);
     try {
-      // We save to the current active chapter index (usually chapterNum - 1 if we just generated it)
-      // This logic is a bit loose in the demo, let's assume we are editing "Current Head"
-      // Ideally UI lets you select chapter.
-      const targetChap = chapterNum > 1 ? chapterNum - 1 : 1; 
-      await api.updateChapter(targetChap, content);
-      setMessages(prev => [...prev, { role: 'assistant', content: "💾 Saved to disk." }]);
+      await api.updateCharacter(name, { [field]: value });
+      addLog(`✅ 角色数据已修正。`);
+      // After fixing character, we might want to reset the retry count and resume
+      await api.updateState(chapterNum, { "simulator_retry_count": 0 });
+      const state = await api.resumeWorkflow(chapterNum);
+      setWorkflow(state);
     } catch (e) {
-      alert("Save failed");
+      addLog(`❌ 修正失败: ${e}`);
     }
   };
+
+  const interventionReason = workflow?.state_values?.intervention_reason;
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden font-sans">
-      <Sidebar />
-
-      {/* Main Workspace */}
-      <div className="flex-1 flex overflow-hidden">
-        
-        {/* Editor Area (Left/Center) */}
-        <div className="flex-1 flex flex-col relative min-w-0">
-          {/* Toolbar */}
-          <div className="h-16 border-b border-gray-200 flex items-center justify-between px-8 bg-white/50 backdrop-blur-sm z-10">
-            <div className="flex items-center gap-2 text-gray-500">
-              <span className="font-serif font-bold text-gray-800">Chapter {chapterNum > 1 ? chapterNum - 1 : 1}</span>
-              <ChevronRight size={16} />
-              <span className="text-sm">Draft</span>
+    <div className="min-h-screen bg-gray-50 p-8 font-sans text-gray-800 flex flex-col">
+      {/* Intervention Overlay / God Mode Console */}
+      {interventionReason && (
+        <div className="fixed inset-x-0 top-0 z-50 bg-red-600 text-white p-4 shadow-2xl animate-in fade-in slide-in-from-top-4">
+          <div className="max-w-7xl mx-auto flex items-start gap-6">
+            <div className="bg-white/20 p-2 rounded-lg">
+              <span className="text-2xl">⚠️</span>
             </div>
-            
-            <button 
-              onClick={handleSave}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 bg-white border border-gray-200 rounded-full shadow-sm hover:shadow transition-all"
-            >
-              <Save size={16} />
-              Save
-            </button>
-          </div>
+            <div className="flex-1">
+              <h3 className="font-bold text-lg uppercase tracking-tight">Logic Deadlock Detected (Simulator Rejected 3x)</h3>
+              <p className="text-sm opacity-90 font-mono mt-1 leading-relaxed">{interventionReason}</p>
+              
+              <div className="mt-4 flex gap-3">
+                <button 
+                  onClick={handleForcePass}
+                  className="bg-white text-red-600 px-4 py-2 rounded font-bold text-xs hover:bg-gray-100 transition-colors"
+                >
+                  FORCE PASS (Ignore Logic)
+                </button>
+                
+                {/* Context-Aware Quick Fixes (Heuristic) */}
+                {interventionReason.includes('断剑') && interventionReason.includes('萧风') && (
+                  <button 
+                    onClick={() => handleFixCharacter("萧风", "inventory", ["铁剑", "断剑", "神秘黑戒(未激活)", "下品灵石x5"])}
+                    className="bg-yellow-400 text-black px-4 py-2 rounded font-bold text-xs hover:bg-yellow-300 transition-colors"
+                  >
+                    FIX: Add "Broken Sword" to Xiao Feng
+                  </button>
+                )}
 
-          {/* Editor Paper */}
-          <div className="flex-1 overflow-y-auto p-8 flex justify-center bg-[#f5f5f5]">
-            <div className="w-full max-w-3xl h-full pb-20">
-              <textarea
-                className="editor-content"
-                placeholder="Start writing or ask the Director to generate..."
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                spellCheck={false}
-              />
+                {interventionReason.includes('已激活') && interventionReason.includes('戒指') && (
+                   <button 
+                    onClick={() => handleFixCharacter("萧风", "inventory", ["铁剑", "神秘黑戒(已激活)", "下品灵石x5"])}
+                    className="bg-blue-400 text-white px-4 py-2 rounded font-bold text-xs hover:bg-blue-300 transition-colors"
+                  >
+                    FIX: Activate Mystery Ring
+                  </button>
+                )}
+
+                <button 
+                  onClick={() => handleUpdate('intervention_reason', null)}
+                  className="border border-white/40 px-4 py-2 rounded font-bold text-xs hover:bg-white/10"
+                >
+                  DISMISS
+                </button>
+              </div>
             </div>
           </div>
         </div>
+      )}
 
-        {/* Chat / Copilot Area (Right) */}
-        <div className="w-[400px] border-l border-gray-200 bg-white flex flex-col shadow-xl z-20">
-          <div className="h-16 border-b border-gray-200 flex items-center px-6 bg-gray-50/50">
-            <span className="font-semibold text-gray-700 flex items-center gap-2">
-              <Bot size={18} className="text-indigo-600"/> 
-              Director Co-Pilot
-            </span>
-          </div>
+      <header className="mb-6 flex justify-between items-center shrink-0">
+        <div>
+          <h1 className="text-3xl font-black tracking-tighter text-blue-900">INFINITE-FLOW <span className="text-blue-500">WRITER</span></h1>
+          <p className="text-sm text-gray-500">2.0M Word Novel Studio | DeepSeek-R1 Inside</p>
+        </div>
+        
+        {/* View Mode Switcher */}
+        <div className="flex bg-gray-200 p-1 rounded-lg">
+           <button 
+             onClick={() => setViewMode('writer')}
+             className={`px-4 py-1 rounded-md text-sm font-bold transition-all ${viewMode === 'writer' ? 'bg-white shadow text-blue-600' : 'text-gray-500'}`}
+           >
+             WRITER
+           </button>
+           <button 
+             onClick={() => setViewMode('graph')}
+             className={`px-4 py-1 rounded-md text-sm font-bold transition-all ${viewMode === 'graph' ? 'bg-white shadow text-purple-600' : 'text-gray-500'}`}
+           >
+             GOD MODE
+           </button>
+        </div>
 
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-gray-50/30">
-            {messages.map((msg, idx) => (
-              <div key={idx} className={clsx("flex gap-3", msg.role === 'user' ? "flex-row-reverse" : "")}>
-                <div className={clsx(
-                  "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
-                  msg.role === 'assistant' ? "bg-indigo-100 text-indigo-600" : "bg-gray-200 text-gray-600"
-                )}>
-                  {msg.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
-                </div>
-                <div className={clsx(
-                  "p-4 rounded-2xl max-w-[85%] text-sm leading-relaxed shadow-sm",
-                  msg.role === 'assistant' ? "bg-white border border-gray-100 text-gray-700" : "bg-indigo-600 text-white"
-                )}>
-                  {msg.content === "Thinking..." ? (
-                    <div className="flex items-center gap-2">
-                      <Loader2 size={14} className="animate-spin" />
-                      <span>Thinking...</span>
-                    </div>
-                  ) : msg.content}
-                </div>
+        <div className="flex gap-4">
+          <StatCard label="Chapter" value={chapterNum} />
+          <StatCard label="Tension" value={workflow?.state_values?.reader_feedback?.tension_score || "0"} color="red" />
+          <StatCard label="Status" value={workflow?.status || "Idle"} color="green" />
+        </div>
+      </header>
+
+      <main className="grid grid-cols-12 gap-8 grow h-0">
+        
+        {/* Left Column: Control Panel */}
+        <div className="col-span-4 flex flex-col gap-6 h-full">
+          <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 shrink-0">
+            <h2 className="text-lg font-bold mb-4 flex items-center">🎬 指挥中心</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-400 mb-1">CHAPTER NUMBER</label>
+                <input 
+                  type="number" 
+                  value={chapterNum} 
+                  onChange={(e) => setChapterNum(parseInt(e.target.value))}
+                  className="w-full p-2 border rounded font-mono"
+                />
               </div>
-            ))}
-            <div ref={chatEndRef} />
-          </div>
-
-          {/* Input */}
-          <div className="p-4 border-t border-gray-200 bg-white">
-            <div className="relative">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleGenerate();
-                  }
-                }}
-                placeholder="Give instructions to the Director..."
-                className="w-full pl-4 pr-12 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none resize-none text-sm min-h-[50px] max-h-[150px]"
-                rows={1}
-                disabled={isGenerating}
-              />
+              <div>
+                <label className="block text-xs font-bold text-gray-400 mb-1">DIRECTOR'S ORDER (OPTIONAL)</label>
+                <textarea 
+                  value={instruction}
+                  onChange={(e) => setInstruction(e.target.value)}
+                  placeholder="例如：这一章要重点刻画主角的挣扎..."
+                  className="w-full p-2 border rounded text-sm h-24"
+                />
+              </div>
               <button 
-                onClick={handleGenerate}
-                disabled={!input.trim() || isGenerating}
-                className="absolute right-2 bottom-2 p-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600 transition-colors"
+                onClick={handleStart}
+                disabled={loading}
+                className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
               >
-                {isGenerating ? <Loader2 size={16} className="animate-spin"/> : <Send size={16} />}
+                {workflow?.status === 'active' ? 'RESTART FLOW' : 'INITIALIZE CHAPTER'}
               </button>
             </div>
-            <div className="text-xs text-center text-gray-400 mt-2">
-              Cmd + Enter to send
-            </div>
-          </div>
+          </section>
+
+          <section className="bg-gray-900 text-green-400 p-6 rounded-xl shadow-inner font-mono text-xs grow overflow-y-auto">
+            <h2 className="text-gray-500 font-bold mb-2 uppercase tracking-widest">System Logs</h2>
+            {logs.map((log, i) => <div key={i} className="mb-1">{`> ${log}`}</div>)}
+          </section>
         </div>
 
-      </div>
+        {/* Right Column: Dynamic Stage Area */}
+        <div className="col-span-8 h-full flex flex-col">
+          
+          {/* View Mode Content */}
+          {viewMode === 'graph' ? (
+              <div className="grow h-full">
+                  <KnowledgeGraph />
+              </div>
+          ) : (
+            <div className="space-y-6 h-full overflow-y-auto pr-2 pb-4">
+              {/* Workflow Stepper */}
+              <div className="bg-white p-2 rounded-full shadow-sm flex items-center justify-around border border-gray-100 shrink-0">
+                 {["director", "editor", "simulator", "writer", "reviewer", "archivist"].map((node) => {
+                   const isActive = workflow?.next_nodes.includes(node);
+                   return (
+                     <div key={node} className={`px-4 py-1 rounded-full text-xs font-bold ${isActive ? 'bg-blue-100 text-blue-600 animate-pulse' : 'text-gray-300'}`}>
+                       {node.toUpperCase()}
+                     </div>
+                   );
+                 })}
+              </div>
+
+              {!workflow && (
+                <div className="h-96 border-2 border-dashed border-gray-200 rounded-xl flex items-center justify-center text-gray-400 italic">
+                  Ready to start your next masterpiece? Initialize above.
+                </div>
+              )}
+
+              {workflow && (
+                <>
+                  {/* Context / Planning View */}
+                  {workflow.next_nodes.includes('editor') && (
+                    <div className="bg-blue-50 p-6 rounded-xl border border-blue-100">
+                      <h3 className="font-bold text-blue-900 mb-2">Director's Decision</h3>
+                      <p className="text-sm text-blue-800 italic">"{workflow.state_values.narrative_focus?.goal || 'Establishing context...'}"</p>
+                      <button onClick={handleResume} className="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg font-bold text-sm">PROCEED TO PLANNING</button>
+                    </div>
+                  )}
+
+                  {/* Editor View */}
+                  {(workflow.state_values.outline_data || workflow.next_nodes.includes('writer')) && (
+                    <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                      <h2 className="text-lg font-bold mb-4 flex justify-between items-center">
+                        📝 Narrative Outline
+                        {workflow.next_nodes.includes('writer') && <span className="text-xs bg-yellow-100 text-yellow-600 px-2 py-1 rounded">PAUSED FOR REVIEW</span>}
+                      </h2>
+                      <textarea 
+                        value={Array.isArray(workflow.state_values.outline_data?.outline) ? workflow.state_values.outline_data.outline.join('\n') : ""}
+                        onChange={(e) => {
+                           const lines = e.target.value.split('\n');
+                           handleUpdate('outline_data', { ...workflow.state_values.outline_data, outline: lines });
+                        }}
+                        className="w-full h-48 p-4 bg-gray-50 font-mono text-sm border-none rounded-lg focus:ring-2 focus:ring-blue-500"
+                      />
+                      {workflow.next_nodes.includes('writer') && (
+                        <button onClick={handleResume} className="mt-4 w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700">CONFIRM & WRITE DRAFT</button>
+                      )}
+                    </section>
+                  )}
+
+                  {/* Writer View */}
+                  {workflow.state_values.draft_content && (
+                    <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                      <h2 className="text-lg font-bold mb-4">✍️ Draft Content</h2>
+                      <div className="prose prose-sm max-w-none bg-gray-50 p-6 rounded-lg font-serif leading-relaxed min-h-[24rem] whitespace-pre-wrap">
+                        {workflow.state_values.draft_content}
+                      </div>
+                      {workflow.next_nodes.includes('archivist') && (
+                        <div className="mt-6 flex gap-4">
+                          <button onClick={handleResume} className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-bold">FINALIZE & ARCHIVE</button>
+                          <button onClick={() => handleUpdate('revision_count', 0)} className="px-6 py-3 border border-gray-200 rounded-lg text-gray-500 font-bold">RE-WRITE</button>
+                        </div>
+                      )}
+                    </section>
+                  )}
+
+                  {/* Reviewer Feedback */}
+                  {workflow.state_values.review_feedback && (
+                    <div className="bg-red-50 p-4 rounded-lg border border-red-100 text-xs text-red-800 font-mono">
+                      <span className="font-bold">Reviewer:</span> {workflow.state_values.review_feedback}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
-}
+};
+
+export default App;

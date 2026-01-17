@@ -68,6 +68,9 @@ class GraphManager:
             self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.driver.verify_connectivity()
             print("✅ Neo4j 连接成功")
+            
+            # 🔥 P8新增: 建立索引 (性能基石)
+            self.setup_indices()
 
             # 🔥 P4新增 + P8升级: 连接成功,重置状态
             self._consecutive_failures = 0
@@ -91,6 +94,79 @@ class GraphManager:
                     self._is_degraded_mode = True
                     self._degraded_since = time.time()  # 🔥 P8新增: 记录进入降级模式的时间
             self.driver = None  # 明确标记为不可用
+
+    def setup_indices(self):
+        """
+        🔥 P8新增: 建立 Neo4j 索引
+        防止随着数据量增长导致的查询雪崩。
+        """
+        queries = [
+            "CREATE INDEX event_uid_idx IF NOT EXISTS FOR (e:Event) ON (e.uid)",
+            "CREATE INDEX event_chapter_idx IF NOT EXISTS FOR (e:Event) ON (e.chapter)",
+            "CREATE INDEX event_status_idx IF NOT EXISTS FOR (e:Event) ON (e.status)",
+            "CREATE INDEX char_name_idx IF NOT EXISTS FOR (c:Character) ON (c.name)",
+            "CREATE INDEX caused_rel_idx IF NOT EXISTS FOR ()-[r:CAUSED]-() ON (r.created_at)"
+        ]
+        try:
+            with self.driver.session() as session:
+                for q in queries:
+                    session.run(q)
+            print("   ⚡️ Neo4j Indices Verified.")
+        except Exception as e:
+            print(f"   ⚠️ 索引建立失败 (可能是权限问题): {e}")
+
+    def optimize_graph(self, current_chapter: int, keep_window: int = 100):
+        """
+        🔥 P8新增: 图谱维护与优化 (Graph Maintenance Protocol)
+        通常在每卷结束或每50章执行一次。
+        
+        功能:
+        1. 归档(剪枝): 将久远的非核心事件标记为 Archived。
+        2. 捷径(Shortcuts): 为深层因果链建立直达捷径。
+        """
+        if not self.is_connected():
+            return
+
+        print(f"🧹 Neo4j Optimization Protocol Initiated (Ch{current_chapter})...")
+        
+        # 1. Archiving (Pruning)
+        # 策略: 保留 recent window 内的所有事件 + 所有的 Core/Major 事件
+        # 其他旧事件 -> Archived
+        archive_threshold = current_chapter - keep_window
+        archive_query = """
+        MATCH (e:Event)
+        WHERE e.chapter < $threshold
+          AND e.status = 'Active'
+          AND (e.type IS NULL OR NOT e.type IN ['Core', 'Major', 'Climax'])
+        SET e.status = 'Archived'
+        RETURN count(e) as archived_count
+        """
+        
+        # 2. Shortcut Creation (Highway Construction)
+        # 策略: 如果 A -> ... -> Z 距离超过 5 且 A 是 Core 事件，建立 A -> Z 的捷径
+        shortcut_query = """
+        MATCH path = (root:Event {type: 'Core'})-[:CAUSED*5..15]->(leaf:Event)
+        WHERE leaf.chapter < $threshold
+          AND NOT (root)-[:CAUSED_SHORTCUT]->(leaf)
+        WITH root, leaf
+        MERGE (root)-[r:CAUSED_SHORTCUT]->(leaf)
+        SET r.created_at = timestamp()
+        RETURN count(r) as shortcut_count
+        """
+        
+        try:
+            with self.driver.session() as session:
+                # Run Archive
+                res1 = session.run(archive_query, threshold=archive_threshold)
+                archived = res1.single()["archived_count"]
+                
+                # Run Shortcuts
+                res2 = session.run(shortcut_query, threshold=archive_threshold)
+                shortcuts = res2.single()["shortcut_count"]
+                
+                print(f"   ✨ Graph Optimized: {archived} events archived, {shortcuts} shortcuts created.")
+        except Exception as e:
+            print(f"   ⚠️ Optimization Failed: {e}")
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -690,61 +766,116 @@ class GraphManager:
                 print(f"   🔗 P8: 自动创建了 {shortcuts_created} 个因果快捷链接")
 
     @retry_neo4j()
-    def get_impact_subgraph(self, entity_name: str, depth: int = 2) -> str:
+    def get_impact_subgraph_data(self, entity_name: str) -> Dict[str, Any]:
         """
-        🔥 P10新增: 获取"冲击波子图" (Impact Subgraph)
-        用于因果模拟：当一个实体发生重大变故(如死亡/背叛)时，
-        找出所有可能受到波及的节点（亲属、盟友、仇敌、所属势力）。
+        🔥 P10新增: 获取"冲击波子图"的结构化数据
         """
         if not self.is_connected():
-            return self._fallback_query_entity_context(entity_name, recent_window=1000)
+            return {"error": "Neo4j Disconnected", "nodes": [], "edges": []}
 
         query = f"""
         MATCH (target {{name: $name}})
         // 1. 获取直接关系
         OPTIONAL MATCH (target)-[r1]-(n1)
         WHERE (n1.status IS NULL OR n1.status = 'Active') 
-          AND (r1.end_chapter IS NULL) // 必须是当前活跃关系
+          AND (r1.end_chapter IS NULL)
 
-        // 2. 获取二阶重要关系 (仅限重要节点或特定强关系)
+        // 2. 获取二阶重要关系
         OPTIONAL MATCH (n1)-[r2]-(n2)
         WHERE (n2.status IS NULL OR n2.status = 'Active')
           AND (r2.end_chapter IS NULL)
           AND (type(r2) IN ['KIN_OF', 'MASTER_OF', 'DISCIPLE_OF', 'LOVES', 'HATES', 'LEADER_OF', 'MEMBER_OF'])
 
         RETURN 
-            target.name as center,
+            target.name as center, labels(target) as center_label,
             type(r1) as rel1, n1.name as neighbor, labels(n1) as type1, r1.desc as desc1,
             type(r2) as rel2, n2.name as distant, labels(n2) as type2, r2.desc as desc2
         LIMIT 50
         """
         
-        impact_lines = set()
+        nodes = {}
+        edges = []
         
+        color_map = {
+            "Character": "#60a5fa", 
+            "Organization": "#a78bfa", 
+            "Location": "#34d399", 
+            "Item": "#fbbf24", 
+            "Event": "#ef4444"
+        }
+
         with self.driver.session() as session:
             result = session.run(query, name=entity_name)
             for record in result:
                 center = record['center']
-                neighbor = record['neighbor']
+                if not center: continue
                 
+                # Add Center
+                if center not in nodes:
+                    lbl = record['center_label'][0] if record['center_label'] else "Unknown"
+                    nodes[center] = {"id": center, "label": center, "group": lbl, "val": 10, "color": color_map.get(lbl)}
+
+                neighbor = record['neighbor']
                 if not neighbor: continue
                 
-                # Format: (Center) --[Rel]--> (Neighbor)
-                line1 = f"({center}) --[{record['rel1']}]--> ({neighbor})"
-                if record['desc1']: line1 += f" ({record['desc1']})"
-                impact_lines.add(line1)
+                # Add Neighbor
+                if neighbor not in nodes:
+                    lbl = record['type1'][0] if record['type1'] else "Unknown"
+                    nodes[neighbor] = {"id": neighbor, "label": neighbor, "group": lbl, "val": 5, "color": color_map.get(lbl)}
                 
-                # Format: (Neighbor) --[Rel]--> (Distant)
+                # Edge 1
+                edge_key = f"{center}-{record['rel1']}-{neighbor}"
+                edges.append({
+                    "from": center, "to": neighbor, 
+                    "label": record['rel1'], 
+                    "title": record['desc1'],
+                    "arrows": "to"
+                })
+
+                # Distant
                 distant = record['distant']
                 if distant and distant != center:
-                    line2 = f"   ↳ ({neighbor}) --[{record['rel2']}]--> ({distant})"
-                    if record['desc2']: line2 += f" ({record['desc2']})"
-                    impact_lines.add(line2)
+                    if distant not in nodes:
+                        lbl = record['type2'][0] if record['type2'] else "Unknown"
+                        nodes[distant] = {"id": distant, "label": distant, "group": lbl, "val": 3, "color": color_map.get(lbl)}
+                    
+                    # Edge 2
+                    edges.append({
+                        "from": neighbor, "to": distant, 
+                        "label": record['rel2'], 
+                        "title": record['desc2'],
+                        "arrows": "to"
+                    })
 
-        if not impact_lines:
+        # Deduplicate edges roughly
+        unique_edges = []
+        seen = set()
+        for e in edges:
+            k = f"{e['from']}_{e['to']}_{e['label']}"
+            if k not in seen:
+                seen.add(k)
+                unique_edges.append(e)
+
+        return {"nodes": list(nodes.values()), "edges": unique_edges}
+
+    @retry_neo4j()
+    def get_impact_subgraph(self, entity_name: str, depth: int = 2) -> str:
+        """
+        🔥 P10新增: 获取"冲击波子图" (Impact Subgraph)
+        """
+        if not self.is_connected():
+            return self._fallback_query_entity_context(entity_name, recent_window=1000)
+
+        data = self.get_impact_subgraph_data(entity_name)
+        if not data["nodes"]:
             return f"系统未检测到 {entity_name} 有活跃的社会关系网。"
+
+        lines = set()
+        for e in data["edges"]:
+            desc = f" ({e['title']})" if e.get('title') else ""
+            lines.add(f"({e['from']}) --[{e['label']}]--> ({e['to']}){desc}")
             
-        return f"# 🕸️ {entity_name} 的社会影响网络 (Impact Subgraph)\n" + "\n".join(sorted(impact_lines))
+        return f"# 🕸️ {entity_name} 的社会影响网络 (Impact Subgraph)\n" + "\n".join(sorted(lines))
 
     @retry_neo4j()
     def get_downstream_dependencies(self, entity_name: str, depth: int = 2) -> List[str]:
@@ -909,13 +1040,14 @@ class GraphManager:
     @retry_neo4j()
     def get_multi_entity_relationships(self, entities: List[str], max_depth: int = 2, current_chapter: int = None, recent_window: int = 500) -> str:
         """
-        🔥 P0优化版: 多实体关系提取 (带时间窗口+提前终止)
+        🔥 P0优化版: 多实体关系提取 (带时间窗口+提前终止+状态过滤)
 
         优化策略:
         1. 时间窗口: 仅查询近期建立的关系
         2. 快速失败: 超时或节点过多时提前返回
         3. 结果限制: 严格限制路径数量
         4. 🔥 P3修复: Neo4j不可用时自动降级到SQL查询
+        5. 🔥 P8优化: 过滤 Archived 节点
 
         性能提升: 复杂场景从>30秒→<5秒
         """
@@ -938,6 +1070,7 @@ class GraphManager:
             return "\n\n".join(lines) if lines else "（关系网过于复杂，建议简化查询）"
 
         # 🔥 添加时间过滤的路径查询
+        # P8: 同时过滤掉 status='Archived' 的节点（除非是路径端点）
         time_filter = ""
         if current_chapter is not None:
             chapter_threshold = max(1, current_chapter - recent_window)
@@ -946,6 +1079,7 @@ class GraphManager:
                 (r.start_chapter IS NULL OR r.start_chapter >= {chapter_threshold})
                 AND (r.end_chapter IS NULL OR r.end_chapter > {current_chapter})
             )
+            AND ALL(n IN nodes(p) WHERE n.status IS NULL OR n.status = 'Active')
             """
 
         query = f"""
