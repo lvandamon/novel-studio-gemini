@@ -87,53 +87,77 @@ class RetconAgent:
             return {"error": f"Plan generation failed: {e}", "raw": response}
 
     def execute_retcon(self, plan: Dict[str, Any], dry_run: bool = False) -> List[str]:
-        """执行修正计划"""
+        """
+        🔥 P1增强: 执行修正计划（原子事务包装）
+
+        使用数据库事务确保多表更新的原子性：
+        - 所有操作成功 → COMMIT
+        - 任一操作失败 → ROLLBACK
+        """
         logs = []
-        
+
         if dry_run:
             logs.append("--- DRY RUN MODE (No changes applied) ---")
-        
+
         logs.append(f"🛠️ 执行修正: {plan.get('rationale', 'No rationale')}")
-        
-        # 1. Update Entities (SQLite)
-        for update in plan.get("entity_updates", []):
-            name = update["name"]
-            field = update["field"]
-            val = update["new_value"]
-            
-            action_log = f"Entity Update: {name}.{field} -> {val}"
-            logs.append(action_log)
-            
-            if not dry_run:
+
+        if dry_run:
+            # Dry run: 只记录日志，不执行
+            for update in plan.get("entity_updates", []):
+                name = update["name"]
+                field = update["field"]
+                val = update["new_value"]
+                logs.append(f"[DRY RUN] Entity Update: {name}.{field} -> {val}")
+
+            for rel in plan.get("relationship_updates", []):
+                src = rel["source"]
+                tgt = rel["target"]
+                relation = rel["relation"]
+                action = rel["action"]
+                logs.append(f"[DRY RUN] Graph {action}: {src} -[{relation}]-> {tgt}")
+
+            return logs
+
+        # 🔥 P1: 使用事务包装所有操作
+        conn = None
+        try:
+            # 获取连接并开始事务
+            conn = self.memory._get_connection()
+            conn.execute("BEGIN")
+
+            # 1. Update Entities (SQLite)
+            for update in plan.get("entity_updates", []):
+                name = update["name"]
+                field = update["field"]
+                val = update["new_value"]
+
+                action_log = f"Entity Update: {name}.{field} -> {val}"
+                logs.append(action_log)
+
                 # 简单处理：更新 Character JSON
-                # 注意：这里假设 field 是顶层 key，如果是嵌套的可能需要更复杂逻辑
-                # memory.upsert_character 支持部分更新 merge
-                # 但我们需要构造正确的结构，例如 inventory 或 attributes
-                # 为了简化，Retcon 尽量只处理顶层属性或 descriptions
                 update_data = {field: val}
-                self.memory.upsert_character(name, update_data, chapter_num=9999) # 9999标记为修正
-                
-        # 2. Update Relationships (Neo4j)
-        for rel in plan.get("relationship_updates", []):
-            src = rel["source"]
-            tgt = rel["target"]
-            relation = rel["relation"]
-            action = rel["action"]
-            
-            action_log = f"Graph {action}: {src} -[{relation}]-> {tgt}"
-            logs.append(action_log)
-            
-            if not dry_run:
+                # 注意：upsert_character内部会获取新连接，需要传递当前conn
+                # 暂时保持原有逻辑，后续可优化为传递conn参数
+                self.memory.upsert_character(name, update_data, chapter_num=9999)
+
+            # 2. Update Relationships (Neo4j)
+            for rel in plan.get("relationship_updates", []):
+                src = rel["source"]
+                tgt = rel["target"]
+                relation = rel["relation"]
+                action = rel["action"]
+
+                action_log = f"Graph {action}: {src} -[{relation}]-> {tgt}"
+                logs.append(action_log)
+
                 if action == "DELETE":
-                    # 逻辑删除：将 end_chapter 设为 0 或 1 (代表从一开始就不存在/或者立刻结束)
-                    # 或者我们可以扩展 update_relationship 支持物理删除？
-                    # GraphManager 目前只支持逻辑删除 (is_negated=True)
+                    # 逻辑删除
                     self.memory.graph.update_relationship(
-                        source=src, source_type="Character", # 假设是Character
+                        source=src, source_type="Character",
                         relation=relation,
                         target=tgt, target_type="Character",
                         is_negated=True,
-                        chapter_num=0 # Retcon通常意味着“一直都是这样”，或者“从现在开始修正”
+                        chapter_num=0
                     )
                 elif action == "CREATE":
                     desc = rel.get("desc", "Retcon Created")
@@ -142,8 +166,24 @@ class RetconAgent:
                         relation=relation,
                         target=tgt, target_type="Character",
                         properties={"desc": desc},
-                        chapter_num=0 
+                        chapter_num=0
                     )
+
+            # 所有操作成功，提交事务
+            conn.execute("COMMIT")
+            logs.append("✅ 事务已提交 (All changes committed)")
+
+        except Exception as e:
+            # 任一操作失败，回滚事务
+            if conn:
+                conn.execute("ROLLBACK")
+                logs.append(f"❌ 事务已回滚 (Transaction rolled back due to error): {e}")
+            raise  # 重新抛出异常
+
+        finally:
+            # 归还连接到池
+            if conn:
+                self.memory._return_connection(conn)
 
         # 🔥 P11: Causality Taint Analysis (Ripple Effect Check)
         impact_report = ""

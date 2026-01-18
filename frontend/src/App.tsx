@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { api } from './api';
 import type { WorkflowState } from './api';
 import KnowledgeGraph from './components/KnowledgeGraph';
+import ExportModal from './components/ExportModal'; // 🔥 New
+import { Download } from 'lucide-react'; // Need to add lucide-react to App imports if not present, but App.tsx likely doesn't have it yet.
 
 // --- Components ---
 
@@ -12,6 +14,76 @@ const StatCard = ({ label, value, color = "blue" }: { label: string, value: stri
   </div>
 );
 
+// --- Helper: Parse Feedback JSON ---
+const parseFeedback = (feedback: string | undefined) => {
+  if (!feedback) return null;
+  try {
+    // If it's a JSON string, parse it
+    if (feedback.trim().startsWith('{')) {
+      return JSON.parse(feedback);
+    }
+  } catch (e) {
+    // Fallback for plain text
+  }
+  return { suggestion: feedback }; // Treat as plain text suggestion
+};
+
+const AuditCard = ({ feedbackRaw }: { feedbackRaw: string }) => {
+  const data = parseFeedback(feedbackRaw);
+  if (!data) return null;
+
+  const metrics = data.metrics || {};
+  const isBlock = data.status === 'BLOCK';
+  const suggestion = data.suggestion || "";
+  
+  // Extract specific reports from suggestion text if not structured
+  // (The backend currently dumps reports into 'suggestion' string)
+  
+  return (
+    <div className={`p-4 rounded-xl border ${isBlock ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'} space-y-4`}>
+      <div className="flex items-center justify-between">
+        <h3 className={`font-bold ${isBlock ? 'text-red-800' : 'text-green-800'} flex items-center gap-2`}>
+          {isBlock ? '⛔ REVIEW BLOCKED' : '✅ REVIEW PASSED'}
+        </h3>
+        {metrics.style_score !== undefined && (
+             <span className="text-xs font-mono px-2 py-1 bg-white/50 rounded text-gray-600">
+               Style Score: <b>{metrics.style_score}</b>
+             </span>
+        )}
+      </div>
+
+      {/* Scores Grid */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-white/60 p-2 rounded">
+           <div className="text-[10px] uppercase text-gray-500 font-bold">Plot Logic</div>
+           <div className={`text-lg font-mono font-bold ${metrics.plot_logic_score < 60 ? 'text-red-600' : 'text-blue-600'}`}>
+             {metrics.plot_logic_score ?? '-'}
+           </div>
+        </div>
+        <div className="bg-white/60 p-2 rounded">
+           <div className="text-[10px] uppercase text-gray-500 font-bold">Alignment</div>
+           <div className={`text-lg font-mono font-bold ${metrics.alignment_score < 60 ? 'text-red-600' : 'text-blue-600'}`}>
+             {metrics.alignment_score ?? '-'}
+           </div>
+        </div>
+        <div className="bg-white/60 p-2 rounded">
+           <div className="text-[10px] uppercase text-gray-500 font-bold">Physics/World</div>
+           <div className={`text-lg font-mono font-bold ${metrics.physics_violation_count > 0 ? 'text-red-600' : 'text-green-600'}`}>
+             {metrics.physics_violation_count > 0 ? `${metrics.physics_violation_count} Violations` : 'OK'}
+           </div>
+        </div>
+      </div>
+
+      {/* Suggestion / Report Body */}
+      {suggestion && (
+        <div className="text-sm font-mono whitespace-pre-wrap bg-white/40 p-3 rounded border border-black/5 text-gray-800 leading-relaxed max-h-60 overflow-y-auto">
+          {suggestion}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   const [chapterNum, setChapterNum] = useState(1);
   const [instruction, setInstruction] = useState("");
@@ -21,6 +93,7 @@ const App: React.FC = () => {
   
   // View Mode: 'writer' | 'graph'
   const [viewMode, setViewMode] = useState<'writer' | 'graph'>('writer');
+  const [showExport, setShowExport] = useState(false); // 🔥 New State
 
   // Auto-refresh state if active
   useEffect(() => {
@@ -163,7 +236,7 @@ const App: React.FC = () => {
         </div>
         
         {/* View Mode Switcher */}
-        <div className="flex bg-gray-200 p-1 rounded-lg">
+        <div className="flex bg-gray-200 p-1 rounded-lg items-center">
            <button 
              onClick={() => setViewMode('writer')}
              className={`px-4 py-1 rounded-md text-sm font-bold transition-all ${viewMode === 'writer' ? 'bg-white shadow text-blue-600' : 'text-gray-500'}`}
@@ -175,6 +248,14 @@ const App: React.FC = () => {
              className={`px-4 py-1 rounded-md text-sm font-bold transition-all ${viewMode === 'graph' ? 'bg-white shadow text-purple-600' : 'text-gray-500'}`}
            >
              GOD MODE
+           </button>
+           <div className="w-px h-4 bg-gray-300 mx-2"></div>
+           <button
+             onClick={() => setShowExport(true)}
+             className="px-3 py-1 text-gray-500 hover:text-green-600 hover:bg-white/50 rounded-md transition-all flex items-center gap-1"
+             title="Export Novel"
+           >
+             <Download size={16} />
            </button>
         </div>
 
@@ -288,15 +369,31 @@ const App: React.FC = () => {
 
                   {/* Writer View */}
                   {workflow.state_values.draft_content && (
-                    <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-                      <h2 className="text-lg font-bold mb-4">✍️ Draft Content</h2>
-                      <div className="prose prose-sm max-w-none bg-gray-50 p-6 rounded-lg font-serif leading-relaxed min-h-[24rem] whitespace-pre-wrap">
-                        {workflow.state_values.draft_content}
-                      </div>
+                    <section className={`bg-white p-6 rounded-xl shadow-sm border ${workflow.next_nodes.includes('writer') ? 'border-yellow-300' : 'border-gray-100'}`}>
+                      <h2 className="text-lg font-bold mb-4 flex justify-between items-center">
+                        ✍️ Draft Content
+                        {workflow.next_nodes.includes('writer') ? (
+                            <span className="text-xs font-bold text-yellow-600 bg-yellow-100 px-2 py-1 rounded">
+                                ⚠️ WILL BE OVERWRITTEN (Edit Outline Below)
+                            </span>
+                        ) : (
+                            <span className="text-xs font-normal text-gray-400">You can edit this before proceeding</span>
+                        )}
+                      </h2>
+                      <textarea
+                        value={workflow.state_values.draft_content}
+                        onChange={(e) => handleUpdate('draft_content', e.target.value)}
+                        className={`w-full min-h-[24rem] p-6 rounded-lg font-serif leading-relaxed whitespace-pre-wrap border transition-all outline-none resize-y ${
+                            workflow.next_nodes.includes('writer') 
+                                ? 'bg-gray-100 text-gray-400 cursor-not-allowed focus:border-gray-200' 
+                                : 'bg-gray-50 focus:border-blue-300 focus:bg-white'
+                        }`}
+                        readOnly={workflow.next_nodes.includes('writer')}
+                      />
                       {workflow.next_nodes.includes('archivist') && (
                         <div className="mt-6 flex gap-4">
-                          <button onClick={handleResume} className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-bold">FINALIZE & ARCHIVE</button>
-                          <button onClick={() => handleUpdate('revision_count', 0)} className="px-6 py-3 border border-gray-200 rounded-lg text-gray-500 font-bold">RE-WRITE</button>
+                          <button onClick={handleResume} className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors">FINALIZE & ARCHIVE</button>
+                          <button onClick={() => handleUpdate('revision_count', 0)} className="px-6 py-3 border border-gray-200 rounded-lg text-gray-500 font-bold hover:bg-gray-50">RE-WRITE</button>
                         </div>
                       )}
                     </section>
@@ -304,9 +401,7 @@ const App: React.FC = () => {
 
                   {/* Reviewer Feedback */}
                   {workflow.state_values.review_feedback && (
-                    <div className="bg-red-50 p-4 rounded-lg border border-red-100 text-xs text-red-800 font-mono">
-                      <span className="font-bold">Reviewer:</span> {workflow.state_values.review_feedback}
-                    </div>
+                    <AuditCard feedbackRaw={workflow.state_values.review_feedback} />
                   )}
                 </>
               )}
@@ -314,6 +409,9 @@ const App: React.FC = () => {
           )}
         </div>
       </main>
+
+      {/* Modals */}
+      {showExport && <ExportModal currentChapter={chapterNum} onClose={() => setShowExport(false)} />}
     </div>
   );
 };

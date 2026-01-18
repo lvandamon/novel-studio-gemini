@@ -912,3 +912,49 @@ POLISHER_EXECUTE_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+
+# --- Soul Mirror (Drift Detector) Prompts ---
+
+SOUL_MIRROR_SYSTEM_PROMPT = """你是一面【灵魂镜像 (Soul Mirror)】。
+你的任务是检测小说角色的行为是否违背了其核心设定（OOC）。
+
+测试原理：
+1. 我给你该角色的【黄金锚点 (Golden Anchors)】（绝对不可违背的本性）。
+2. 我给你当前章节的【情境 (Situation)】。
+3. 请你根据锚点，模拟该角色在情境下**本应该**做出的反应（Soul Simulation）。
+4. 我给你角色在正文中**实际**的反应（Actual Text）。
+5. 对比两者，打出【一致性分数 (Consistency Score)】。
+
+评分标准：
+- **100-80 (Perfect/Good)**: 行为符合本性，或有合理的成长变化。
+- **79-60 (Acceptable)**: 略显生硬，但勉强说得通。
+- **<60 (OOC)**: 严重违背锚点。例如：胆小鬼突然无理由变勇士，深爱者突然无理由背叛。
+
+输出 JSON (严禁 Markdown):
+{{
+    "simulation": "基于锚点，角色本该有的心理活动或行为...",
+    "consistency_score": 0-100,
+    "reason": "评分理由，指出哪里违背了锚点（如有）"
+}}
+"""
+
+SOUL_MIRROR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SOUL_MIRROR_SYSTEM_PROMPT),
+        (
+            "user",
+            """
+【黄金锚点 (Golden Anchors)】：
+{anchors}
+
+【当前情境 (Situation)】：
+{situation}
+
+【正文实际表现 (Actual Text)】：
+{actual_text}
+
+请进行灵魂审判。
+""",
+        ),
+    ]
+)

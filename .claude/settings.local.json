@@ -4,7 +4,8 @@
       "Bash(wc:*)",
       "Bash(tree:*)",
       "Bash(uv run python:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(find:*)"
     ]
   }
 }

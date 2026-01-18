@@ -3,6 +3,8 @@ import sqlite3
 import json
 import os
 import uuid
+import threading
+from queue import Queue, Empty
 import chromadb # Explicit import
 from typing import List, Dict, Any, Optional
 from langchain_chroma import Chroma
@@ -13,6 +15,93 @@ from core.graph_store import GraphManager
 from core.llm import get_deepseek_chat
 from core.prompts import ENTITY_EXTRACTION_PROMPT
 from core.character_evolution import DynamicAnchorManager
+
+# 🔥 P1新增: SQLite连接池
+class SQLiteConnectionPool:
+    """
+    轻量级SQLite连接池
+
+    特性:
+    - 线程安全
+    - 自动连接回收
+    - 支持WAL模式
+    - 防止死锁
+    """
+
+    def __init__(self, db_path: str, pool_size: int = 5, timeout: float = 30.0):
+        self.db_path = db_path
+        self.pool_size = pool_size
+        self.timeout = timeout
+        self._pool = Queue(maxsize=pool_size)
+        self._lock = threading.Lock()
+        self._created_connections = 0
+
+        # 预创建连接
+        for _ in range(pool_size):
+            conn = self._create_connection()
+            if conn:
+                self._pool.put(conn)
+
+    def _create_connection(self) -> Optional[sqlite3.Connection]:
+        """创建新连接"""
+        try:
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=self.timeout,
+                check_same_thread=False  # 允许跨线程使用
+            )
+            conn.row_factory = sqlite3.Row  # 返回字典式结果
+            # 启用WAL模式
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            return conn
+        except Exception as e:
+            print(f"   ⚠️ 连接池创建连接失败: {e}")
+            return None
+
+    def get_connection(self) -> sqlite3.Connection:
+        """从池中获取连接"""
+        try:
+            # 尝试从池中获取现有连接
+            conn = self._pool.get(block=True, timeout=5.0)
+            # 验证连接是否有效
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except:
+                # 连接失效，创建新连接
+                conn = self._create_connection()
+                if not conn:
+                    raise Exception("无法创建数据库连接")
+                return conn
+        except Empty:
+            # 池已空，动态创建新连接（不超过最大值）
+            with self._lock:
+                if self._created_connections < self.pool_size * 2:
+                    conn = self._create_connection()
+                    if conn:
+                        self._created_connections += 1
+                        return conn
+            raise Exception("连接池耗尽，请稍后重试")
+
+    def return_connection(self, conn: sqlite3.Connection):
+        """归还连接到池"""
+        try:
+            # 回滚任何未完成的事务
+            conn.rollback()
+            self._pool.put(conn, block=False)
+        except:
+            # 池已满，关闭连接
+            conn.close()
+
+    def close_all(self):
+        """关闭所有连接"""
+        while not self._pool.empty():
+            try:
+                conn = self._pool.get(block=False)
+                conn.close()
+            except:
+                break
 
 class MemoryManager:
     def __init__(self, db_path: str = "data/novel.db", vector_db_path: str = "data/vector_store"):
@@ -25,6 +114,13 @@ class MemoryManager:
         # 确保数据目录存在
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(self.vector_db_path, exist_ok=True)
+
+        # 🔥 P1新增: 初始化连接池
+        self._connection_pool = SQLiteConnectionPool(
+            db_path=self.db_path,
+            pool_size=5,
+            timeout=self._connection_timeout
+        )
 
         # 1. 初始化 SQLite
         self._init_sqlite()
@@ -251,6 +347,13 @@ class MemoryManager:
         try:
             cursor.execute('ALTER TABLE character_anchors ADD COLUMN evolution_logic TEXT')
         except: pass
+        # 🔥 P1修复: 锚点粉碎时间戳
+        try:
+            cursor.execute('ALTER TABLE character_anchors ADD COLUMN shattered_chapter INTEGER')
+        except: pass
+        try:
+            cursor.execute('ALTER TABLE character_anchors ADD COLUMN transcended_chapter INTEGER')
+        except: pass
 
         # 卷管理表
         cursor.execute('''
@@ -400,7 +503,7 @@ class MemoryManager:
             )
         ''')
 
-        # 🔥 P0新增: 关系备份表 (Neo4j Fallback)
+        # 🔥 P0+P1增强: 关系备份表 (Neo4j Fallback with JSON metadata)
         # 当Neo4j不可用时，使用此表存储简化的关系信息
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS relationship_backup (
@@ -413,11 +516,17 @@ class MemoryManager:
                 description TEXT,
                 start_chapter INTEGER,
                 end_chapter INTEGER,  -- NULL表示关系仍有效
+                metadata JSON,  -- 🔥 P1新增: 存储结构化关系元数据 {"intensity": 5, "tags": ["revenge"], "properties": {...}}
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(source_name, relation, target_name, start_chapter)
             )
         ''')
+
+        # 🔥 P1新增: 迁移 - 添加 metadata 列
+        try:
+            cursor.execute('ALTER TABLE relationship_backup ADD COLUMN metadata JSON')
+        except: pass
 
         # 🔥 P0新增: 事件备份表 (Neo4j Fallback)
 
@@ -434,6 +543,61 @@ class MemoryManager:
             )
         ''')
 
+        # 🔥 P1修复: 物品耐久度变更历史表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS inventory_change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                chapter_num INTEGER NOT NULL,
+                change_type TEXT NOT NULL, -- 'ACQUIRED', 'CONSUMED', 'DAMAGED', 'REPAIRED', 'LOST', 'EQUIPPED', 'UNEQUIPPED'
+                old_quantity INTEGER,
+                new_quantity INTEGER,
+                old_durability INTEGER,
+                new_durability INTEGER,
+                old_status TEXT,
+                new_status TEXT,
+                reason TEXT, -- 变更原因描述
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 🔥 P1修复: 状态效果变更历史表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS status_effect_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT NOT NULL,
+                effect_name TEXT NOT NULL,
+                chapter_num INTEGER NOT NULL,
+                change_type TEXT NOT NULL, -- 'APPLIED', 'INTENSIFIED', 'WEAKENED', 'REMOVED', 'EXPIRED'
+                old_intensity INTEGER,
+                new_intensity INTEGER,
+                old_duration INTEGER,
+                new_duration INTEGER,
+                reason TEXT, -- 施加/移除原因
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 🔥 P1修复: 身体部件状态变更历史表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS body_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_name TEXT NOT NULL,
+                body_part TEXT NOT NULL,
+                chapter_num INTEGER NOT NULL,
+                change_type TEXT NOT NULL, -- 'INJURED', 'HEALED', 'SEVERED', 'CRIPPLED', 'RESTORED'
+                old_health INTEGER,
+                new_health INTEGER,
+                old_is_severed BOOLEAN,
+                new_is_severed BOOLEAN,
+                old_is_crippled BOOLEAN,
+                new_is_crippled BOOLEAN,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS event_backup (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -443,9 +607,15 @@ class MemoryManager:
                 event_type TEXT DEFAULT 'Major',
                 participants TEXT,  -- JSON: ["角色1", "角色2"]
                 cause_event_uid TEXT,  -- 因果链: 上游事件
+                metadata JSON,  -- 🔥 P1新增: 存储事件元数据 {"impact": "high", "reality_layer": "Reality", "tags": [...]}
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # 🔥 P1新增: 迁移 - 添加 event_backup metadata 列
+        try:
+            cursor.execute('ALTER TABLE event_backup ADD COLUMN metadata JSON')
+        except: pass
 
         # 🔥 P0优化: 创建高频查询索引
         print("   📊 正在创建性能优化索引...")
@@ -488,6 +658,20 @@ class MemoryManager:
         ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_event_backup_chapter ON event_backup(chapter)
+        ''')
+
+        # 6. 🔥 P1新增: 变更历史索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_inventory_log_char_chapter ON inventory_change_log(character_name, chapter_num)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_inventory_log_item ON inventory_change_log(item_name, chapter_num)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_status_log_char_chapter ON status_effect_log(character_name, chapter_num)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_body_log_char_chapter ON body_status_log(character_name, chapter_num)
         ''')
 
         print("   ✅ 索引创建完成")
@@ -634,16 +818,47 @@ class MemoryManager:
 
     def _get_connection(self):
         """
-        🔥 P0优化: 获取数据库连接 (带超时和优化参数)
+        🔥 P1增强: 从连接池获取数据库连接
+
+        使用连接池避免并发死锁：
+        - 线程安全
+        - 自动连接回收
+        - 防止连接泄漏
         """
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=self._connection_timeout,
-            isolation_level=None  # 自动提交模式,减少锁竞争
-        )
-        # 为每个连接启用优化参数
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+        return self._connection_pool.get_connection()
+
+    def _return_connection(self, conn: sqlite3.Connection):
+        """
+        🔥 P1新增: 归还连接到池
+        """
+        self._connection_pool.return_connection(conn)
+
+    class _ConnectionContext:
+        """
+        🔥 P1新增: 连接上下文管理器
+
+        用法:
+        with self._connection_context() as conn:
+            cursor = conn.cursor()
+            cursor.execute(...)
+        # 连接自动归还到池
+        """
+        def __init__(self, pool: 'SQLiteConnectionPool'):
+            self.pool = pool
+            self.conn = None
+
+        def __enter__(self):
+            self.conn = self.pool.get_connection()
+            return self.conn
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.conn:
+                self.pool.return_connection(self.conn)
+            return False
+
+    def _connection_context(self):
+        """返回连接上下文管理器"""
+        return self._ConnectionContext(self._connection_pool)
 
     def log_chapter_metrics(self, chapter_num: int, metrics: Dict[str, Any]):
         """记录章节遥测数据 - 🔥 P0优化: 使用优化连接"""
@@ -2955,9 +3170,9 @@ class MemoryManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # 查询该实体作为source的关系
+        # 🔥 P1增强: 查询该实体作为source的关系（包含metadata）
         cursor.execute('''
-            SELECT source_name, relation, target_name, target_type, description, start_chapter
+            SELECT source_name, relation, target_name, target_type, description, start_chapter, metadata
             FROM relationship_backup
             WHERE source_name = ?
               AND (start_chapter IS NULL OR start_chapter <= ?)
@@ -2967,9 +3182,9 @@ class MemoryManager:
         ''', (entity_name, current_chapter, current_chapter))
         outgoing = cursor.fetchall()
 
-        # 查询该实体作为target的关系
+        # 🔥 P1增强: 查询该实体作为target的关系（包含metadata）
         cursor.execute('''
-            SELECT source_name, relation, target_name, source_type, description, start_chapter
+            SELECT source_name, relation, target_name, source_type, description, start_chapter, metadata
             FROM relationship_backup
             WHERE target_name = ?
               AND (start_chapter IS NULL OR start_chapter <= ?)
@@ -2988,17 +3203,45 @@ class MemoryManager:
 
         if outgoing:
             lines.append("\n## 出向关系 (Outgoing):")
-            for src, rel, tgt, tgt_type, desc, ch in outgoing:
+            for src, rel, tgt, tgt_type, desc, ch, meta_json in outgoing:
                 ch_tag = f" @Ch{ch}" if ch else ""
                 desc_tag = f" ({desc})" if desc else ""
-                lines.append(f"  ({src}) --[{rel}]--> ({tgt}:{tgt_type}){desc_tag}{ch_tag}")
+                # 🔥 P1增强: 解析metadata并显示
+                meta_str = ""
+                if meta_json:
+                    try:
+                        meta = json.loads(meta_json)
+                        meta_parts = []
+                        if "intensity" in meta:
+                            meta_parts.append(f"强度:{meta['intensity']}")
+                        if "tags" in meta:
+                            meta_parts.append(f"标签:{','.join(meta['tags'])}")
+                        if meta_parts:
+                            meta_str = f" [{', '.join(meta_parts)}]"
+                    except:
+                        pass
+                lines.append(f"  ({src}) --[{rel}]--> ({tgt}:{tgt_type}){desc_tag}{meta_str}{ch_tag}")
 
         if incoming:
             lines.append("\n## 入向关系 (Incoming):")
-            for src, rel, tgt, src_type, desc, ch in incoming:
+            for src, rel, tgt, src_type, desc, ch, meta_json in incoming:
                 ch_tag = f" @Ch{ch}" if ch else ""
                 desc_tag = f" ({desc})" if desc else ""
-                lines.append(f"  ({src}:{src_type}) --[{rel}]--> ({tgt}){desc_tag}{ch_tag}")
+                # 🔥 P1增强: 解析metadata并显示
+                meta_str = ""
+                if meta_json:
+                    try:
+                        meta = json.loads(meta_json)
+                        meta_parts = []
+                        if "intensity" in meta:
+                            meta_parts.append(f"强度:{meta['intensity']}")
+                        if "tags" in meta:
+                            meta_parts.append(f"标签:{','.join(meta['tags'])}")
+                        if meta_parts:
+                            meta_str = f" [{', '.join(meta_parts)}]"
+                    except:
+                        pass
+                lines.append(f"  ({src}:{src_type}) --[{rel}]--> ({tgt}){desc_tag}{meta_str}{ch_tag}")
 
         return "\n".join(lines)
 
@@ -3051,3 +3294,146 @@ class MemoryManager:
 
         # 回退到 SQLite
         return self.query_relationships_from_backup(entity_name, current_chapter)
+
+    # 🔥 P1新增: 变更历史追踪方法
+
+    def log_inventory_change(self, character_name: str, item_name: str, chapter_num: int,
+                           change_type: str, old_quantity: int = None, new_quantity: int = None,
+                           old_durability: int = None, new_durability: int = None,
+                           old_status: str = None, new_status: str = None, reason: str = ""):
+        """记录物品变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO inventory_change_log
+            (character_name, item_name, chapter_num, change_type, old_quantity, new_quantity,
+             old_durability, new_durability, old_status, new_status, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (character_name, item_name, chapter_num, change_type, old_quantity, new_quantity,
+              old_durability, new_durability, old_status, new_status, reason))
+        conn.commit()
+        conn.close()
+        print(f"   📦 Inventory Log: {character_name} - {item_name} [{change_type}] (Ch{chapter_num})")
+
+    def log_status_effect_change(self, character_name: str, effect_name: str, chapter_num: int,
+                                change_type: str, old_intensity: int = None, new_intensity: int = None,
+                                old_duration: int = None, new_duration: int = None, reason: str = ""):
+        """记录状态效果变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO status_effect_log
+            (character_name, effect_name, chapter_num, change_type, old_intensity, new_intensity,
+             old_duration, new_duration, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (character_name, effect_name, chapter_num, change_type, old_intensity, new_intensity,
+              old_duration, new_duration, reason))
+        conn.commit()
+        conn.close()
+        print(f"   💊 Status Effect Log: {character_name} - {effect_name} [{change_type}] (Ch{chapter_num})")
+
+    def log_body_status_change(self, character_name: str, body_part: str, chapter_num: int,
+                              change_type: str, old_health: int = None, new_health: int = None,
+                              old_is_severed: bool = None, new_is_severed: bool = None,
+                              old_is_crippled: bool = None, new_is_crippled: bool = None,
+                              reason: str = ""):
+        """记录身体状态变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO body_status_log
+            (character_name, body_part, chapter_num, change_type, old_health, new_health,
+             old_is_severed, new_is_severed, old_is_crippled, new_is_crippled, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (character_name, body_part, chapter_num, change_type, old_health, new_health,
+              old_is_severed, new_is_severed, old_is_crippled, new_is_crippled, reason))
+        conn.commit()
+        conn.close()
+        print(f"   🩺 Body Status Log: {character_name} - {body_part} [{change_type}] (Ch{chapter_num})")
+
+    def get_inventory_history(self, character_name: str = None, item_name: str = None,
+                             chapter_from: int = None, chapter_to: int = None) -> List[Dict]:
+        """查询物品变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM inventory_change_log WHERE 1=1"
+        params = []
+
+        if character_name:
+            query += " AND character_name = ?"
+            params.append(character_name)
+        if item_name:
+            query += " AND item_name = ?"
+            params.append(item_name)
+        if chapter_from:
+            query += " AND chapter_num >= ?"
+            params.append(chapter_from)
+        if chapter_to:
+            query += " AND chapter_num <= ?"
+            params.append(chapter_to)
+
+        query += " ORDER BY chapter_num ASC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
+
+    def get_status_effect_history(self, character_name: str = None, effect_name: str = None,
+                                 chapter_from: int = None, chapter_to: int = None) -> List[Dict]:
+        """查询状态效果变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM status_effect_log WHERE 1=1"
+        params = []
+
+        if character_name:
+            query += " AND character_name = ?"
+            params.append(character_name)
+        if effect_name:
+            query += " AND effect_name = ?"
+            params.append(effect_name)
+        if chapter_from:
+            query += " AND chapter_num >= ?"
+            params.append(chapter_from)
+        if chapter_to:
+            query += " AND chapter_num <= ?"
+            params.append(chapter_to)
+
+        query += " ORDER BY chapter_num ASC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]
+
+    def get_body_status_history(self, character_name: str, body_part: str = None,
+                               chapter_from: int = None, chapter_to: int = None) -> List[Dict]:
+        """查询身体状态变更历史"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM body_status_log WHERE character_name = ?"
+        params = [character_name]
+
+        if body_part:
+            query += " AND body_part = ?"
+            params.append(body_part)
+        if chapter_from:
+            query += " AND chapter_num >= ?"
+            params.append(chapter_from)
+        if chapter_to:
+            query += " AND chapter_num <= ?"
+            params.append(chapter_to)
+
+        query += " ORDER BY chapter_num ASC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(zip([col[0] for col in cursor.description], row)) for row in rows]

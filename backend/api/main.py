@@ -15,11 +15,17 @@ from core.workflow import NovelWorkflow
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
 
+from agents.retcon_agent import RetconAgent # 🔥 New Import
+from core.exporter import NovelExporter # 🔥 New Import
+from fastapi.responses import FileResponse
+
 # Global State
 system_state = {
     "memory": None,
     "workflow": None,
-    "workflow_app": None
+    "workflow_app": None,
+    "retcon_agent": None,
+    "exporter": None # 🔥 New
 }
 
 @asynccontextmanager
@@ -31,6 +37,8 @@ async def lifespan(app: FastAPI):
         system_state["workflow"] = NovelWorkflow(system_state["memory"])
         # Build with persistence
         system_state["workflow_app"] = system_state["workflow"].build_graph(db_path="data/workflow_state.db")
+        system_state["retcon_agent"] = RetconAgent(system_state["memory"])
+        system_state["exporter"] = NovelExporter() # 🔥 Init Exporter
         logger.info("✅ System Ready")
     except Exception as e:
         logger.error(f"❌ Boot failed: {e}")
@@ -38,6 +46,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DeepSeek Novel Studio API", lifespan=lifespan)
 
+# ... (Middleware kept same) ...
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -46,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic Models ---
+# ... (Previous Models kept same) ...
 
 class StartRequest(BaseModel):
     chapter_num: int
@@ -55,7 +64,7 @@ class StartRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     chapter_num: int
-    user_input: Optional[Dict[str, Any]] = None # Input to next node
+    user_input: Optional[Dict[str, Any]] = None 
 
 class StateUpdateRequest(BaseModel):
     chapter_num: int
@@ -65,10 +74,114 @@ class GraphVizRequest(BaseModel):
     center_entity: Optional[str] = None
     depth: int = 2
 
-# --- Helpers ---
+class RetconPreviewRequest(BaseModel):
+    instruction: str
 
+class RetconApplyRequest(BaseModel):
+    plan: Dict[str, Any]
+
+class ExportRequest(BaseModel):
+    start_chapter: int
+    end_chapter: int
+    format: str = "txt" # txt, epub
+
+# ... (Helpers kept same) ...
 def get_thread_config(chapter_num: int):
     return {"configurable": {"thread_id": str(chapter_num)}}
+
+# --- Export Endpoints ---
+
+@app.post("/api/export/generate")
+def generate_export(req: ExportRequest):
+    """Generate a book export for download."""
+    mem: MemoryManager = system_state["memory"]
+    exporter: NovelExporter = system_state["exporter"]
+    
+    # 1. Fetch Chapters
+    chapters = []
+    for i in range(req.start_chapter, req.end_chapter + 1):
+        # Try to get draft content or summary
+        # Ideally, MemoryManager should have `get_chapter_text(i)`
+        # For now, we hack it by checking if we have archival data or just raw logs
+        # Let's assume we can pull from the 'events' or 'summaries' if full text isn't in a simple table yet
+        # Actually, Archivist saves full text to `novel_output/chapter_{i}.txt` usually.
+        # Let's read from disk for now as a fallback, or DB if available.
+        
+        # Check DB first? 
+        # Since we don't have a dedicated "full text" table in schema presented (only vector/summary),
+        # we'll rely on the standard file output convention of Archivist
+        # or we check the Checkpointer DB? Checkpointer is binary serialized.
+        
+        # Fallback: Read from `novel_output/`
+        fpath = f"novel_output/chapter_{i}.md" # Archivist usually saves here?
+        if not os.path.exists(fpath):
+             fpath = f"novel_output/chapter_{i}.txt"
+             
+        content = ""
+        title = ""
+        if os.path.exists(fpath):
+            with open(fpath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        else:
+            content = f"(Chapter {i} not found on disk)"
+            
+        chapters.append({
+            "num": i,
+            "title": f"Chapter {i}", # TODO: Fetch real title from DB
+            "content": content
+        })
+    
+    # 2. Generate
+    book_title = "Infinite Flow Story" # TODO: Fetch from global config
+    
+    try:
+        if req.format.lower() == "epub":
+            path = exporter.generate_epub(book_title, "DeepSeek-V3", chapters)
+        else:
+            path = exporter.generate_txt(book_title, chapters)
+            
+        return {"download_url": f"/api/export/download?path={path}"}
+    except Exception as e:
+        raise HTTPException(500, f"Export failed: {e}")
+
+@app.get("/api/export/download")
+def download_file(path: str):
+    if not os.path.exists(path):
+        raise HTTPException(404, "File not found")
+    return FileResponse(path, filename=os.path.basename(path))
+
+# --- Retcon Endpoints ---
+
+@app.post("/api/retcon/preview")
+def preview_retcon(req: RetconPreviewRequest):
+    """Analyze a retcon instruction and return a plan with impact analysis."""
+    agent: RetconAgent = system_state["retcon_agent"]
+    try:
+        # 1. Generate Plan
+        plan = agent.analyze_retcon(req.instruction)
+        
+        # 2. Perform a Dry Run to generate logs/impact warnings
+        # Note: execute_retcon(dry_run=True) returns logs which contain the impact analysis
+        logs = agent.execute_retcon(plan, dry_run=True)
+        
+        return {
+            "plan": plan,
+            "impact_analysis": logs
+        }
+    except Exception as e:
+        logger.error(f"Retcon preview failed: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/retcon/apply")
+def apply_retcon(req: RetconApplyRequest):
+    """Execute the retcon plan."""
+    agent: RetconAgent = system_state["retcon_agent"]
+    try:
+        logs = agent.execute_retcon(req.plan, dry_run=False)
+        return {"success": True, "logs": logs}
+    except Exception as e:
+        logger.error(f"Retcon execution failed: {e}")
+        raise HTTPException(500, str(e))
 
 # --- Workflow Endpoints ---
 

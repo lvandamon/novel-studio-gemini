@@ -29,6 +29,7 @@ class NovelState(TypedDict):
     # Feedback Loops
     simulator_feedback: str
     simulator_retry_count: int
+    simulator_rejection_history: list  # 🔥 P2新增: 模拟器驳回历史（死锁检测）
     review_feedback: str
     revision_count: int
     reader_feedback: Dict[str, Any] # New: Store reader sentiment
@@ -38,7 +39,7 @@ class NovelState(TypedDict):
     requires_director_review: bool  # 🔥 P1新增: 标记需要Director特殊审查
     high_risk_flag: bool  # 🔥 P1新增: 标记高风险章节(Simulator多次驳回)
     archivist_rejected: bool # 🔥 P7新增: 档案员逻辑驳回标记
-    
+
     # Intervention
     intervention_reason: Optional[str] # 🔥 P10新增: 人工干预原因
     flashback_injection: Optional[str] # 🔥 P10新增: 用户手动注入的闪回/记忆
@@ -169,24 +170,81 @@ class NovelWorkflow:
     def node_simulator_check(self, state: NovelState) -> NovelState:
         """Node 2.5: Simulator (Character Logic Sandbox)"""
         print(f"\n🧠 === Workflow: Simulator Check ===")
-        
+
         outline_data = state["outline_data"]
         active_chars = outline_data.get("active_characters", [])
-        
+
         if not active_chars:
             print("   ⚠️ 无活跃角色，跳过模拟。")
             state["simulator_feedback"] = "PASS"
             return state
-            
+
         result = self.simulator.simulate_outline(outline_data, active_chars)
-        
+
         if result.get("status") == "REJECT":
-            state["simulator_feedback"] = f"【模拟器驳回】: {result.get('conflict_analysis')}\n【修改建议】: {result.get('suggestion')}"
+            # 🔥 P2优化: 累积历史驳回原因，避免死锁
+            retry_count = state.get("simulator_retry_count", 0)
+
+            # 记录本次被驳回的大纲文本（用于相似度检测）
+            current_outline = "\n".join(outline_data.get("outline", []))
+            history = state.get("simulator_rejection_history", [])
+            history.append({
+                "retry": retry_count,
+                "outline": current_outline,
+                "reason": result.get('conflict_analysis', ''),
+                "suggestion": result.get('suggestion', '')
+            })
+            state["simulator_rejection_history"] = history
+
+            # 检测是否出现相似的驳回（死锁）
+            if retry_count >= 1:
+                prev_outline = history[-2]["outline"] if len(history) >= 2 else ""
+                similarity = self._outline_similarity(prev_outline, current_outline)
+
+                if similarity > 0.7:  # 相似度超过70%
+                    print(f"   ⚠️ 检测到大纲陷入死锁循环（相似度: {similarity:.2%}）")
+                    # 注入强制变更建议
+                    escalated_suggestion = f"""
+【死锁警告】Editor已连续生成{retry_count}次相似大纲，请激进变更：
+1. 完全替换主要剧情冲突点
+2. 改变关键角色的行动逻辑
+3. 调整场景地点或时间线
+
+历史驳回原因汇总：
+{chr(10).join(f"- 第{h['retry']}次: {h['reason']}" for h in history)}
+
+修改建议汇总：
+{chr(10).join(f"- {h['suggestion']}" for h in history)}
+"""
+                    state["simulator_feedback"] = f"【模拟器驳回-死锁】: {escalated_suggestion}"
+                else:
+                    state["simulator_feedback"] = f"【模拟器驳回】: {result.get('conflict_analysis')}\n【修改建议】: {result.get('suggestion')}"
+            else:
+                state["simulator_feedback"] = f"【模拟器驳回】: {result.get('conflict_analysis')}\n【修改建议】: {result.get('suggestion')}"
         else:
             state["simulator_feedback"] = "PASS"
-            
+            # 清空重试历史（成功后重置）
+            state["simulator_rejection_history"] = []
+
         state["simulator_retry_count"] = state.get("simulator_retry_count", 0) + 1
         return state
+
+    def _outline_similarity(self, text1: str, text2: str) -> float:
+        """计算两个大纲文本的相似度（简单启发式：Jaccard相似度）"""
+        if not text1 or not text2:
+            return 0.0
+
+        # 分词（简单按字符分割）
+        words1 = set(text1)
+        words2 = set(text2)
+
+        if not words1 or not words2:
+            return 0.0
+
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+
+        return intersection / union if union > 0 else 0.0
 
     def node_writer_gen(self, state: NovelState) -> NovelState:
         """Node 3: Writer (Execution)"""
@@ -320,51 +378,142 @@ class NovelWorkflow:
         print(f"   🔙 模拟器驳回(尝试 {retries}/3)，Editor 重写大纲...")
         return "reject"
 
+    def _calculate_weighted_quality_score(self, metrics: Dict[str, Any]) -> Dict[str, float]:
+        """
+        🔥 P2优化: 加权评分系统
+
+        根据不同维度的重要性计算综合质量分：
+        - 硬逻辑 (Hard Logic): 权重40% - 最关键
+        - 叙事对齐 (Narrative Alignment): 权重25% - 导演意志
+        - 角色一致性 (Character Consistency): 权重20% - OOC检测
+        - 文风质量 (Style Quality): 权重10% - 氛围营造
+        - 母题共鸣 (Thematic Resonance): 权重5% - 深度
+
+        Returns:
+            Dict with 'weighted_score', 'breakdown', 'failed_categories'
+        """
+        # 评分权重配置（可根据章节类型动态调整）
+        weights = {
+            "plot_logic_score": 0.40,        # 硬逻辑
+            "alignment_score": 0.25,          # 叙事对齐
+            "character_consistency_score": 0.20,  # 角色一致性
+            "style_score": 0.10,              # 文风
+            "thematic_score": 0.05            # 母题
+        }
+
+        # 各维度的及格线（低于此分数将触发警告）
+        thresholds = {
+            "plot_logic_score": 75,           # 逻辑最严格
+            "alignment_score": 70,            # 叙事对齐次之
+            "character_consistency_score": 70, # 角色一致性
+            "style_score": 60,                # 文风可适度放宽
+            "thematic_score": 50              # 母题最宽松
+        }
+
+        breakdown = {}
+        weighted_sum = 0.0
+        total_weight = 0.0
+        failed_categories = []
+
+        for key, weight in weights.items():
+            score = metrics.get(key, 100)  # 默认100分（假设未检测=通过）
+            weighted_sum += score * weight
+            total_weight += weight
+            breakdown[key] = score
+
+            # 检查是否低于及格线
+            if score < thresholds.get(key, 60):
+                failed_categories.append({
+                    "category": key,
+                    "score": score,
+                    "threshold": thresholds[key],
+                    "weight": weight
+                })
+
+        weighted_score = weighted_sum / total_weight if total_weight > 0 else 100
+
+        return {
+            "weighted_score": weighted_score,
+            "breakdown": breakdown,
+            "failed_categories": failed_categories
+        }
+
     def check_review_status(self, state: NovelState) -> Literal["approve", "reject"]:
         import json
         feedback_raw = state.get("review_feedback", "")
         revisions = state.get("revision_count", 0)
-        
+
         try:
             feedback_data = json.loads(feedback_raw)
         except:
             # Fallback for legacy string format or error
             if "PASS" in feedback_raw: return "approve"
             return "reject"
-            
+
         status = feedback_data.get("status", "BLOCK")
         metrics = feedback_data.get("metrics", {})
-        
-        # --- DIRECTOR'S ROLLBACK AUTHORITY (熔断机制) ---
-        # 即使 Status 是 PASS，如果核心指标过低，强制驳回
-        logic_score = metrics.get("plot_logic_score", 100)
-        alignment_score = metrics.get("alignment_score", 100) # Director's Will
-        
-        threshold = 80 # 严格标准
-        
-        if revisions >= 3:
-            print("   ⚠️ 达到最大修改次数 (3)，强制通过（即使有瑕疵）。")
+
+        # 🔥 P2优化: 使用加权评分系统替代硬编码阈值
+        quality_analysis = self._calculate_weighted_quality_score(metrics)
+        weighted_score = quality_analysis["weighted_score"]
+        failed_cats = quality_analysis["failed_categories"]
+        breakdown = quality_analysis["breakdown"]
+
+        # 动态阈值：根据修订次数放宽标准
+        if revisions == 0:
+            approval_threshold = 75  # 首次审核，标准严格
+        elif revisions == 1:
+            approval_threshold = 70  # 第二次，略微放宽
+        elif revisions == 2:
+            approval_threshold = 65  # 第三次，进一步放宽
+        else:
+            # 第4次及以上，强制通过（避免无限循环）
+            print("   ⚠️ 达到最大修改次数 (3+)，强制通过（即使有瑕疵）。")
             return "approve"
 
         if status == "BLOCK":
-            print(f"   ❌ Reviewer 明确驳回: {feedback_data.get('suggestion')}")
+            print(f"   ❌ Reviewer 明确驳回: {feedback_data.get('suggestion', '')[:50]}...")
             return "reject"
-            
-        if logic_score < threshold:
-            print(f"   🛡️ 逻辑熔断 (Logic {logic_score} < {threshold}) -> 强制回滚！")
-            # 注入新的修改建议
-            feedback_data["suggestion"] = f"【系统强制驳回】逻辑分过低 ({logic_score})。请检查硬逻辑冲突。"
+
+        # 检查是否有关键维度失败
+        critical_failures = [f for f in failed_cats if f["weight"] >= 0.20]  # 权重≥20%的维度
+
+        if critical_failures:
+            # 构建详细反馈
+            failure_report = "【关键维度失败】\n"
+            for fail in critical_failures:
+                failure_report += f"- {fail['category']}: {fail['score']:.1f} (要求≥{fail['threshold']}, 权重{fail['weight']*100:.0f}%)\n"
+
+            print(f"   🛡️ 关键维度熔断 -> 强制回滚！")
+            print(f"   {failure_report}")
+
+            feedback_data["suggestion"] = failure_report + "\n" + feedback_data.get("suggestion", "")
             state["review_feedback"] = json.dumps(feedback_data, ensure_ascii=False)
             return "reject"
 
-        if alignment_score < threshold:
-            print(f"   🎬 导演回滚 (Alignment {alignment_score} < {threshold}) -> 严重偏离叙事焦点！")
-             # 注入新的修改建议
-            feedback_data["suggestion"] = f"【导演强制驳回】你写偏了！({alignment_score})。请严格遵循 Narrative Focus (Goal/Beat)。"
+        # 检查加权综合分
+        if weighted_score < approval_threshold:
+            print(f"   🎯 综合评分不足 ({weighted_score:.1f} < {approval_threshold}) -> 驳回")
+            print(f"   各维度: Logic={breakdown.get('plot_logic_score', 100):.0f}, " +
+                  f"Alignment={breakdown.get('alignment_score', 100):.0f}, " +
+                  f"Char={breakdown.get('character_consistency_score', 100):.0f}, " +
+                  f"Style={breakdown.get('style_score', 100):.0f}")
+
+            suggestion = f"【综合评分不足】加权总分仅 {weighted_score:.1f} (要求≥{approval_threshold})。"
+            if failed_cats:
+                suggestion += "\n待改进维度:\n"
+                for fail in failed_cats:
+                    suggestion += f"- {fail['category']}: {fail['score']:.1f} (要求≥{fail['threshold']})\n"
+
+            feedback_data["suggestion"] = suggestion + "\n" + feedback_data.get("suggestion", "")
             state["review_feedback"] = json.dumps(feedback_data, ensure_ascii=False)
             return "reject"
-            
-        print(f"   ✅ 审核通过 (Logic: {logic_score}, Alignment: {alignment_score})")
+
+        print(f"   ✅ 审核通过 (综合分: {weighted_score:.1f}/{approval_threshold})")
+        print(f"   各维度: Logic={breakdown.get('plot_logic_score', 100):.0f}, " +
+              f"Alignment={breakdown.get('alignment_score', 100):.0f}, " +
+              f"Char={breakdown.get('character_consistency_score', 100):.0f}, " +
+              f"Style={breakdown.get('style_score', 100):.0f}")
         return "approve"
 
     def build_graph(self, db_path: str = "data/workflow_state.db", enable_interrupts: bool = True):

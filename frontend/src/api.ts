@@ -80,5 +80,32 @@ export const api = {
       updates: updates
     });
     return res.data;
+  },
+
+  // --- Retcon Tools ---
+
+  async previewRetcon(instruction: string) {
+    const res = await axios.post(`${API_BASE}/retcon/preview`, {
+      instruction: instruction
+    });
+    return res.data; // { plan: ..., impact_analysis: string[] }
+  },
+
+  async applyRetcon(plan: any) {
+    const res = await axios.post(`${API_BASE}/retcon/apply`, {
+      plan: plan
+    });
+    return res.data; // { success: true, logs: string[] }
+  },
+
+  // --- Export ---
+
+  async generateExport(start: number, end: number, format: 'txt' | 'epub') {
+    const res = await axios.post(`${API_BASE}/export/generate`, {
+      start_chapter: start,
+      end_chapter: end,
+      format: format
+    });
+    return res.data; // { download_url: string }
   }
 };

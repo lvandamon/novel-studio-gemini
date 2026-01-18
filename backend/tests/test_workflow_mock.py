@@ -35,6 +35,15 @@ def workflow():
     wf.writer.write_chapter = MagicMock(return_value="This is Chapter 1 text.")
     wf.reviewer.review_draft = MagicMock(return_value="PASS")
     wf.archivist.archive_chapter = MagicMock()
+    wf.simulator.simulate_outline = MagicMock(return_value={"status": "PASS"}) # 🔥 Mock Simulator
+    wf.polisher.polish_draft = MagicMock(side_effect=lambda draft, outline: draft) # Pass-through
+    wf.reader.read_chapter = MagicMock(return_value={
+        "boredom_score": 10, 
+        "expectation_score": 90, 
+        "reader_mood": "Excited", 
+        "comment": "Good", 
+        "highlight": "None"
+    })
     
     yield wf
     
@@ -54,8 +63,9 @@ def test_full_workflow_happy_path(workflow):
     }
     
     # Run graph
-    app = workflow.build_graph()
-    result = app.invoke(initial_state)
+    app = workflow.build_graph(enable_interrupts=False)
+    config = {"configurable": {"thread_id": "test_thread_1"}}
+    result = app.invoke(initial_state, config)
     
     # Verify sequence
     workflow.director.evaluate_progress.assert_called_once() # Ch 1 triggers director
@@ -64,7 +74,8 @@ def test_full_workflow_happy_path(workflow):
     workflow.reviewer.review_draft.assert_called_once()
     workflow.archivist.archive_chapter.assert_called_once()
     
-    assert result["final_content"] == "This is Chapter 1 text."
+    assert result["draft_content"] == "This is Chapter 1 text."
+    assert "This is Chapter 1 text." in result["final_content"]
 
 def test_workflow_revision_loop(workflow):
     # Mock Reviewer to fail once then pass
@@ -77,8 +88,9 @@ def test_workflow_revision_loop(workflow):
         "revision_count": 0
     }
     
-    app = workflow.build_graph()
-    result = app.invoke(initial_state)
+    app = workflow.build_graph(enable_interrupts=False)
+    config = {"configurable": {"thread_id": "test_thread_2"}}
+    result = app.invoke(initial_state, config)
     
     # Verify Director skipped
     workflow.director.evaluate_progress.assert_not_called()

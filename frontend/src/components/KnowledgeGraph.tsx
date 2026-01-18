@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import ForceGraph2D, { type ForceGraphMethods } from 'react-force-graph-2d';
 import { api } from '../api';
-import { Search, Clock, RefreshCw, Filter, ZoomIn, ZoomOut } from 'lucide-react';
+import { Search, Clock, RefreshCw, Filter, ZoomIn, ZoomOut, Zap } from 'lucide-react';
+import RetconModal from './RetconModal';
 
 interface ForceGraphData {
   nodes: any[];
@@ -33,6 +34,9 @@ const KnowledgeGraph: React.FC = () => {
   
   // UI State for panel collapse
   const [showPanel, setShowPanel] = useState(true);
+
+  // 🔥 Retcon State
+  const [retconTarget, setRetconTarget] = useState<string | null>(null);
 
   useEffect(() => {
     // Responsive Resize
@@ -114,6 +118,18 @@ const KnowledgeGraph: React.FC = () => {
   return (
     <div className="relative h-full w-full bg-gray-950 rounded-xl overflow-hidden shadow-2xl border border-gray-800" ref={containerRef}>
       
+      {/* --- Retcon Modal --- */}
+      {retconTarget && (
+        <RetconModal 
+          initialEntity={retconTarget}
+          onClose={() => setRetconTarget(null)}
+          onSuccess={() => {
+              refreshGraph(); // Refresh graph after retcon
+              setRetconTarget(null);
+          }}
+        />
+      )}
+
       {/* --- Filter Panel --- */}
       <div className={`absolute top-4 left-4 z-20 transition-all duration-300 ${showPanel ? 'w-80' : 'w-12'}`}>
         <div className="bg-gray-900/90 backdrop-blur-md border border-gray-700 rounded-lg shadow-xl overflow-hidden">
@@ -190,6 +206,17 @@ const KnowledgeGraph: React.FC = () => {
                     </button>
                   )}
                 </div>
+                
+                {/* 🔥 Retcon Trigger Button (Contextual) */}
+                {filters.focusNode && (
+                  <button 
+                    onClick={() => setRetconTarget(filters.focusNode)}
+                    className="w-full mt-2 bg-purple-900/50 hover:bg-purple-800 text-purple-300 py-1.5 rounded text-xs font-bold border border-purple-800 flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <Zap size={12} />
+                    RETCON: {filters.focusNode}
+                  </button>
+                )}
               </div>
 
               {/* 3. Actions */}
@@ -226,13 +253,19 @@ const KnowledgeGraph: React.FC = () => {
       <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
          <button 
             className="bg-gray-800 p-2 rounded-lg text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 transition-all"
-            onClick={() => fgRef.current?.zoomIn()}
+            onClick={() => {
+                const currentZoom = fgRef.current?.zoom();
+                if (currentZoom) fgRef.current?.zoom(currentZoom * 1.5, 400);
+            }}
          >
             <ZoomIn size={18} />
          </button>
          <button 
             className="bg-gray-800 p-2 rounded-lg text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 transition-all"
-            onClick={() => fgRef.current?.zoomOut()}
+            onClick={() => {
+                const currentZoom = fgRef.current?.zoom();
+                if (currentZoom) fgRef.current?.zoom(currentZoom / 1.5, 400);
+            }}
          >
             <ZoomOut size={18} />
          </button>

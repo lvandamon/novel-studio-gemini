@@ -156,7 +156,7 @@ class HighlightSchema(BaseModel):
 
 class ChapterExtractionSchema(BaseModel):
     summary: str
-    characters: List[Dict[str, Any]] 
+    characters: List[Dict[str, Any]]
     events: List[EventSchema]
     relationships: List[GraphTripletSchema] = Field(default_factory=list)
     new_foreshadowing: List[ForeshadowingSchema]
@@ -165,3 +165,7 @@ class ChapterExtractionSchema(BaseModel):
     highlights: List[HighlightSchema] = Field(default_factory=list) # 🔥 P5新增: 高光时刻提取
     world_updates: List[Dict[str, Any]] = Field(default_factory=list)
     current_date: str = Field(..., description="更新后的世界日期")
+
+    # 🔥 P2新增: 提取置信度评分
+    extraction_confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="LLM提取结果的置信度 (0-1)")
+    uncertain_items: List[str] = Field(default_factory=list, description="不确定的提取项列表")

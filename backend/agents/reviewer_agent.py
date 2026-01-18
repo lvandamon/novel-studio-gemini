@@ -7,6 +7,7 @@ from core.prompts import REVIEWER_CHECK_PROMPT, ANCHOR_VIOLATION_CHECK_PROMPT
 from core.memory import MemoryManager
 from core.physics_validator import PhysicsValidator  # 🔥 P1新增
 from core.style_checker import StyleChecker  # 🔥 P2新增
+from core.world_consistency import WorldConsistencyEngine # 🔥 P3新增
 
 class ReviewerAgent:
     def __init__(self, memory_manager: MemoryManager):
@@ -16,6 +17,7 @@ class ReviewerAgent:
         self.memory = memory_manager
         self.physics_validator = PhysicsValidator(memory_manager)  # 🔥 P1新增
         self.style_checker = StyleChecker() # 🔥 P2新增: 文风质检
+        self.world_engine = WorldConsistencyEngine(memory_manager) # 🔥 P3新增: 世界一致性
 
         # 🔥 P0新增: 锚点校验专用轻量LLM (快速校验)
         self.anchor_validator_llm = get_deepseek_chat(temperature=0.1)
@@ -151,15 +153,27 @@ class ReviewerAgent:
         )
         physics_report = self.physics_validator.generate_validation_report(physics_violations)
 
+        # 🔥 P3新增: 世界一致性验证 (经济/地理)
+        world_violations = self.world_engine.generate_report(content, active_characters, chapter_num)
+        world_report = ""
+        if world_violations:
+            world_report = "\n【🌍 世界一致性警告】\n"
+            for v in world_violations:
+                world_report += f"- {v['detail']}\n"
+            print(f"   ⚠️ 发现 {len(world_violations)} 个世界一致性冲突!")
+
         # 如果有致命违规,直接拦截
         critical_violations = [v for v in physics_violations if v['severity'] == 'CRITICAL']
-        if critical_violations:
-            print(f"   🔴 检测到 {len(critical_violations)} 个致命物理违规,强制拦截!")
+        # 经济逻辑崩坏也视作严重错误
+        world_critical = [v for v in world_violations if v.get('severity') == 'ERROR']
+        
+        if critical_violations or world_critical:
+            print(f"   🔴 检测到致命逻辑违规,强制拦截!")
             return json.dumps({
                 "status": "BLOCK",
-                "suggestion": physics_report,
+                "suggestion": physics_report + "\n" + world_report,
                 "metrics": {
-                    "physics_violation_count": len(physics_violations),
+                    "physics_violation_count": len(physics_violations) + len(world_violations),
                     "plot_logic_score": 0,
                     "alignment_score": 0
                 }
@@ -223,6 +237,8 @@ class ReviewerAgent:
 
 【物理约束验证】
 {physics_report}
+
+{world_report}
 
 {style_report}
 """
